@@ -149,3 +149,17 @@ def is_transformers_version_in_range(min_version: str, max_version: str) -> bool
 
     # Check if the version is within the specified range
     return version.parse(min_version) <= version.parse(transformers_version) <= version.parse(max_version)
+
+
+
+def apply_monkey_patch_encoder(model: PreTrainedModel):
+    from verl.models.transformers.qwen2_5_vl import encoder_forward
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+    Qwen2_5_VisionTransformerPretrainedModel.encoder_forward = encoder_forward
+    
+def apply_monkey_patch_llm(model: PreTrainedModel):
+    from verl.models.transformers.qwen2_5_vl import llm_forward, __init__
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
+    Qwen2_5_VLModel.__init__ = __init__
+    Qwen2_5_VLModel.llm_forward = llm_forward
+    

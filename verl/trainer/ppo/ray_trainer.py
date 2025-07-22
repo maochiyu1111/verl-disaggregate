@@ -689,6 +689,7 @@ class RayPPOTrainer:
             critic_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Critic], config=self.config.critic)
             self.resource_pool_to_cls[resource_pool]["critic"] = critic_cls
 
+        # 在这里还要做修改，在fit里面的ref_wg改成ref_encoder_wg，需要在这里做修改
         # create reference policy if needed
         if self.use_reference_policy:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
@@ -971,7 +972,12 @@ class RayPPOTrainer:
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with _timer("ref", timing_raw):
-                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                            encoder_results = self.ref_encoder_wg.compute_ref_log_prob_encoder(batch)
+                            # image_embed = encoder_results.batch["image_embed"]
+                            # video_embed = encoder_results.batch["video_embed"]
+                            # union encoder embed
+                            batch = batch.union(encoder_results)
+                            ref_log_prob = self.ref_llm_wg.compute_ref_log_prob_llm(batch)
                             batch = batch.union(ref_log_prob)
 
                     # compute values
