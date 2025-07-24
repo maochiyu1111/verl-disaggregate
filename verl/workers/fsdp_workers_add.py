@@ -70,14 +70,17 @@ class ActorRolloutRefWorker_encoder(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.role = role
-        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
+        assert self.role in ["encode_ref", "encoder_actor"]
 
-        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
-        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
-        self._is_ref = self.role in ["ref", "actor_rollout_ref"]
+        self._is_actor = self.role is "encoder_actor"
+        # 由于actor和rollout一定共享硬件资源（hybrid engine）因此省略encoder_rollout，合并到encoder_actor
+        self._is_rollout = self.role is "encoder_actor"
+        self._is_ref = self.role is "encode_ref"
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
+        # 目前来看，可以保持原有设置，即在offload设置上，encoder保持原actor与ref的设置，不自行新增设置
+        # qzy:严格来说应该删去actor和ref设置，新增encoder_actor和encoder_ref设置
         if self._is_actor:
             self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
             self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
@@ -85,6 +88,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             # TODO: it seems that manual offload is slowly than FSDP offload
             self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
 
+        # qzy:这部分代码先暂时不变，目前encoder_actor 和 llm_actor的batch size都和原actor对齐，但是后面应该是要改的，做到分离
         # normalize config
         if self._is_actor:
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
@@ -123,7 +127,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq, Qwen2_5_VisionTransformerPretrainedModel
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
@@ -135,7 +139,8 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        # encoder doesn't have tokenizer
+        self.tokenizer = None
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
 
         torch_dtype = fsdp_config.get("model_dtype", None)
@@ -147,15 +152,9 @@ class ActorRolloutRefWorker_encoder(Worker):
         # override model kwargs
         actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
 
-        self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
+        # encoder doesn't need generation_config
+        # self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
-        override_config_kwargs = {
-            "bos_token_id": self.tokenizer.bos_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
-            "pad_token_id": self.tokenizer.pad_token_id,
-        }
-        override_config_kwargs.update(override_model_config)
-        update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         if self.rank == 0:
             print(f"Model config after override: {actor_model_config}")
 
@@ -164,10 +163,8 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
-                actor_module_class = AutoModelForVision2Seq
-            else:
-                actor_module_class = AutoModelForCausalLM
+
+            actor_module_class = Qwen2_5_VisionTransformerPretrainedModel
 
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
@@ -187,6 +184,9 @@ class ActorRolloutRefWorker_encoder(Worker):
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
                 _apply_liger_kernel_to_instance(model=actor_module)
+            
+            from verl.models.transformers.monkey_patch import apply_monkey_patch_encoder
+            apply_monkey_patch_encoder(model=actor_module)
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
@@ -228,6 +228,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         # We force reference policy to use CPUOffload to save memory.
         # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
         cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
+        # qzy:这个地方encoder_ref encoder_actor llm_ref llm_actor的strategy都和原actor保持一致，后续可能会进行修改
         fsdp_strategy = self.config.actor.strategy
         if fsdp_strategy == "fsdp":
             actor_module_fsdp = FSDP(
@@ -324,7 +325,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.path)
+            local_path = copy_to_local(self.config.model.encoder.path)
             if vllm_mode == "customized":
                 rollout = vLLMRollout(
                     actor_module=self.actor_module_fsdp,
@@ -374,7 +375,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.path)
+            local_path = copy_to_local(self.config.model.encoder.path)
             rollout = SGLangRollout(
                 actor_module=local_path,
                 config=self.config.rollout,
@@ -402,7 +403,7 @@ class ActorRolloutRefWorker_encoder(Worker):
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=None)
             rollout = AsyncSGLangRollout(
-                actor_module=self.config.model.path,
+                actor_module=self.config.model.encoder.path,
                 config=self.config.rollout,
                 tokenizer=self.tokenizer,
                 model_hf_config=self.actor_model_config,
@@ -448,7 +449,8 @@ class ActorRolloutRefWorker_encoder(Worker):
                 optim_config = None
                 fsdp_config = OmegaConf.create()
             self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
-                model_path=self.config.model.path,
+                model_path=self.config.model.encoder.path,
+                # model_path=self.config.model.path,
                 fsdp_config=fsdp_config,
                 optim_config=optim_config,
                 override_model_config=override_model_config,
@@ -475,14 +477,14 @@ class ActorRolloutRefWorker_encoder(Worker):
             OmegaConf.set_struct(self.config.actor, True)
             with open_dict(self.config.actor):
                 self.config.actor.use_remove_padding = use_remove_padding
-            self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
+            self.actor = DataParallelPPOEncoder(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
-                model_path=self.config.model.path,
+                model_path=self.config.model.encoder.path,
                 fsdp_config=self.config.ref.fsdp_config,
                 optim_config=None,
                 override_model_config=override_model_config,
@@ -494,7 +496,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
-            self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+            self.ref_policy = DataParallelPPOEncoder(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
@@ -550,43 +552,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
-        # Support all hardwares
-        prompts = prompts.to(torch.cuda.current_device())
-
-        assert self._is_rollout
-
-        meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
-        }
-        prompts.meta_info.update(meta_info)
-        with self.rollout_sharding_manager:
-            log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
-
-            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-
-            if self.config.rollout.name == "sglang_async":
-                from verl.workers.rollout.sglang_rollout import AsyncSGLangRollout
-
-                if isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout, "_tool_schemas") and len(self.rollout._tool_schemas) > 0:
-                    output = self.rollout.generate_sequences_with_tools(prompts=prompts)
-                else:
-                    output = self.rollout.generate_sequences(prompts=prompts)
-            else:
-                output = self.rollout.generate_sequences(prompts=prompts)
-            log_gpu_memory_usage("After rollout generation", logger=logger)
-
-            output = self.rollout_sharding_manager.postprocess_data(output)
-
-        output = output.to("cpu")
-
-        # clear kv cache
-        torch.cuda.empty_cache()
-        return output
-
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_log_prob(self, data: DataProto):
+    def compute_log_prob_encoder(self, data: DataProto):
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
@@ -601,11 +567,13 @@ class ActorRolloutRefWorker_encoder(Worker):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-            output = DataProto.from_dict(
-                tensors={"old_log_probs": output, "entropys": entropys},
-                meta_info={"temperature": self.config.rollout.temperature},
-            )
+            # output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            # output = DataProto.from_dict(
+            #     tensors={"old_log_probs": output, "entropys": entropys},
+            #     meta_info={"temperature": self.config.rollout.temperature},
+            # )
+            image_embed, video_embed = self.actor.extract_features(data=data)
+            output = DataProto.from_dict(tensors={"image_embed": image_embed, "video_embed": video_embed})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
@@ -622,7 +590,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_ref_log_prob(self, data: DataProto):
+    def compute_ref_log_prob_encoder(self, data: DataProto):
         assert self._is_ref
 
         # Support all hardwares
@@ -635,8 +603,10 @@ class ActorRolloutRefWorker_encoder(Worker):
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
-            output = DataProto.from_dict(tensors={"ref_log_prob": output})
+            # output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            # output = DataProto.from_dict(tensors={"ref_log_prob": output})
+            image_embed, video_embed = self.actor.extract_features(data=data)
+            output = DataProto.from_dict(tensors={"image_embed": image_embed, "video_embed": video_embed})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
@@ -707,11 +677,12 @@ class ActorRolloutRefWorker_llm(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.role = role
-        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
+        # 这部分改动同encoder
+        assert self.role in ["llm_ref", "llm_actor"]
 
-        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
-        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
-        self._is_ref = self.role in ["ref", "actor_rollout_ref"]
+        self._is_actor = self.role is "llm_actor"
+        self._is_rollout = self.role is "llm_actor"
+        self._is_ref = self.role is "llm_ref"
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
@@ -760,7 +731,7 @@ class ActorRolloutRefWorker_llm(Worker):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq, Qwen2_5_VLTextModel
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
@@ -773,6 +744,7 @@ class ActorRolloutRefWorker_llm(Worker):
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        # 这个地方暂时也加上吧
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
 
         torch_dtype = fsdp_config.get("model_dtype", None)
@@ -801,10 +773,7 @@ class ActorRolloutRefWorker_llm(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
-                actor_module_class = AutoModelForVision2Seq
-            else:
-                actor_module_class = AutoModelForCausalLM
+            actor_module_class = Qwen2_5_VLTextModel
 
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
@@ -824,6 +793,9 @@ class ActorRolloutRefWorker_llm(Worker):
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 
                 _apply_liger_kernel_to_instance(model=actor_module)
+                
+            from verl.models.transformers.monkey_patch import apply_monkey_patch_llm
+            apply_monkey_patch_llm(model=actor_module)
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
@@ -961,7 +933,7 @@ class ActorRolloutRefWorker_llm(Worker):
             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.path)
+            local_path = copy_to_local(self.config.model.llm.path)
             if vllm_mode == "customized":
                 rollout = vLLMRollout(
                     actor_module=self.actor_module_fsdp,
@@ -1011,7 +983,7 @@ class ActorRolloutRefWorker_llm(Worker):
             from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.path)
+            local_path = copy_to_local(self.config.model.llm.path)
             rollout = SGLangRollout(
                 actor_module=local_path,
                 config=self.config.rollout,
@@ -1039,7 +1011,7 @@ class ActorRolloutRefWorker_llm(Worker):
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=None)
             rollout = AsyncSGLangRollout(
-                actor_module=self.config.model.path,
+                actor_module=self.config.model.llm.path,
                 config=self.config.rollout,
                 tokenizer=self.tokenizer,
                 model_hf_config=self.actor_model_config,
@@ -1085,7 +1057,7 @@ class ActorRolloutRefWorker_llm(Worker):
                 optim_config = None
                 fsdp_config = OmegaConf.create()
             self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
-                model_path=self.config.model.path,
+                model_path=self.config.model.llm.path,
                 fsdp_config=fsdp_config,
                 optim_config=optim_config,
                 override_model_config=override_model_config,
@@ -1119,7 +1091,7 @@ class ActorRolloutRefWorker_llm(Worker):
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
-                model_path=self.config.model.path,
+                model_path=self.config.model.llm.path,
                 fsdp_config=self.config.ref.fsdp_config,
                 optim_config=None,
                 override_model_config=override_model_config,
@@ -1223,7 +1195,7 @@ class ActorRolloutRefWorker_llm(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_log_prob(self, data: DataProto):
+    def compute_log_prob_llm(self, data: DataProto):
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
@@ -1259,7 +1231,7 @@ class ActorRolloutRefWorker_llm(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_ref_log_prob(self, data: DataProto):
+    def compute_ref_log_prob_llm(self, data: DataProto):
         assert self._is_ref
 
         # Support all hardwares
@@ -1272,7 +1244,7 @@ class ActorRolloutRefWorker_llm(Worker):
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            output, _ = self.ref_policy.compute_log_prob_llm(data=data, calculate_entropy=False)
             output = DataProto.from_dict(tensors={"ref_log_prob": output})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
