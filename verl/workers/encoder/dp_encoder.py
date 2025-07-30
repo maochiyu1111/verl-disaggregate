@@ -82,27 +82,6 @@ class DataParallelPPOEncoder(BasePPOEncoder):
 
         return video_embed, image_embed
     
-    
-    # mokeypatch
-    def encoder_forward(
-        self,
-        pixel_values: Optional[torch.Tensor] = None,
-        pixel_values_videos: Optional[torch.FloatTensor] = None,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ):
-        if pixel_values is not None:
-            image_embeds = self.get_image_features(pixel_values, image_grid_thw)
-            image_embeds = torch.cat(image_embeds, dim=0)
-            
-        if pixel_values_videos is not None:
-            video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
-            video_embeds = torch.cat(video_embeds, dim=0)
-            
-        return image_embeds, video_embeds
-    
-
     # qzy note：先不处理encoder需要更新的情况
     # def _optimizer_step(self):
     #     assert self.config.grad_clip is not None
