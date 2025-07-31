@@ -37,7 +37,7 @@ class BasePPOEncoder(ABC):
         self.config = config
 
     @abstractmethod
-    def extract_features(self, data: DataProto) -> torch.Tensor:
+    def extract_feature(self, data: DataProto) -> torch.Tensor:
         """extract mutimodal features given a batch of data.
 
         Args:

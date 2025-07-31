@@ -1300,7 +1300,7 @@ class ActorRolloutRefWorker_encoder(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.workers.actor import DataParallelPPOActor
+        from verl.workers.encoder import DataParallelPPOEncoder
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
@@ -1443,7 +1443,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             #     tensors={"old_log_probs": output, "entropys": entropys},
             #     meta_info={"temperature": self.config.rollout.temperature},
             # )
-            image_embed, video_embed = self.actor.extract_features(data=data)
+            image_embed, video_embed = self.actor.extract_feature(data=data)
             output = DataProto.from_dict(tensors={"image_embed": image_embed, "video_embed": video_embed})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
@@ -1476,7 +1476,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             data = self.ulysses_sharding_manager.preprocess_data(data)
             # output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
             # output = DataProto.from_dict(tensors={"ref_log_prob": output})
-            image_embed, video_embed = self.actor.extract_features(data=data)
+            image_embed, video_embed = self.actor.extract_feature(data=data)
             output = DataProto.from_dict(tensors={"image_embed": image_embed, "video_embed": video_embed})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 

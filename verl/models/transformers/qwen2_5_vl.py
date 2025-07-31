@@ -14,14 +14,19 @@
 
 from dataclasses import dataclass
 from importlib.metadata import version
-from typing import Optional
+from typing import Optional, Union
 
 import torch
+import torch.nn as nn
 from packaging.version import Version
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VLCausalLMOutputWithPast,
     Qwen2_5_VLForConditionalGeneration,
+    Qwen2_5_VLTextModel,
+    
 )
+
+from transformers.utils import is_torchdynamo_compiling
 
 
 @dataclass
@@ -360,38 +365,13 @@ def __init__(self, config):
 
     # Initialize weights and apply final processing
     self.post_init()
-
-# 也要patch，原Qwen2_5_VLCausalLMOutputWithPast 代替 原Qwen2_5_VLModelOutputWithPast
-class ModelOutputWithPast(ModelOutput):
-    r"""
-    loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-        Language modeling loss (for next-token prediction).
-    logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-        Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-    past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-        Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of shape
-        `(batch_size, num_heads, sequence_length, embed_size_per_head)`)
-
-        Contains pre-computed hidden-states (key and values in the self-attention blocks) that can be used (see
-        `past_key_values` input) to speed up sequential decoding.
-    rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
-        The rope index difference between sequence length and multimodal rope.
-    """
-
-    loss: Optional[torch.FloatTensor] = None
-    logits: Optional[torch.FloatTensor] = None
-    past_key_values: Optional[list[torch.FloatTensor]] = None
-    hidden_states: Optional[tuple[torch.FloatTensor]] = None
-    attentions: Optional[tuple[torch.FloatTensor]] = None
-    rope_deltas: Optional[torch.LongTensor] = None
-    
     
 def llm_forward(
     self,
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_values: Optional[Cache] = None,
+    past_key_values: Optional[list[torch.FloatTensor]] = None,
     inputs_embeds: Optional[torch.FloatTensor] = None,
     labels: Optional[torch.LongTensor] = None,
     use_cache: Optional[bool] = None,
@@ -408,8 +388,8 @@ def llm_forward(
     logits_to_keep: Union[int, torch.Tensor] = 0,
     image_embed: torch.Tensor = None,
     video_embed: torch.Tensor = None,
-    **kwargs: Unpack[TransformersKwargs],
-) -> Union[tuple, Qwen2_5_VLModelOutputWithPast]:
+    **kwargs,
+) -> tuple | Qwen2_5_VLCausalLMOutputWithPast:
     r"""
     image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
         The temporal, height and width of feature shape of each image in LLM.
@@ -529,7 +509,7 @@ def llm_forward(
     if labels is not None:
         loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)
 
-    return ModelOutputWithPast(
+    return Qwen2_5_VLCausalLMOutputWithPast(
         loss=loss,
         logits=logits,
         past_key_values=outputs.past_key_values,
