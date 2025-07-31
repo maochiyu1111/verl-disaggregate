@@ -103,7 +103,7 @@ class TaskRunner:
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
             assert config.critic.strategy in ["fsdp", "fsdp2"]
             from verl.single_controller.ray import RayWorkerGroup
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
+            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker, ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
 
             actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
@@ -126,13 +126,23 @@ class TaskRunner:
             Role.Critic: ray.remote(CriticWorker),
         }
 
-        global_pool_id = "global_pool"
+        # global_pool_id = "global_pool"
+        actor_rollout_id = "actor_rollout_pool"
+        ref_encoder_id = "ref_encoder_pool"
+        ref_llm_id = "ref_llm_pool"
+
+        # resource_pool_spec = {
+        #     global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        # }
+
         resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+            actor_rollout_id: [6],
+            ref_encoder_id: [1],
+            ref_llm_id:[1],
         }
         mapping = {
-            Role.ActorRollout: global_pool_id,
-            Role.Critic: global_pool_id,
+            Role.ActorRollout: actor_rollout_id,
+            Role.Critic: actor_rollout_id,
         }
 
         # we should adopt a multi-source reward function here
@@ -149,12 +159,16 @@ class TaskRunner:
             else:
                 raise NotImplementedError
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
-            mapping[Role.RewardModel] = global_pool_id
+            mapping[Role.RewardModel] = actor_rollout_id
 
         # use reference model
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
-            mapping[Role.RefPolicy] = global_pool_id
+            # role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+            # mapping[Role.RefPolicy] = ref_id
+            role_worker_mapping[Role.EncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
+            role_worker_mapping[Role.LLMRef] = ray.remote(ActorRolloutRefWorker_llm)
+            mapping[Role.EncoderRef] = ref_encoder_id
+            mapping[Role.LLMRef] = ref_llm_id
 
         reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
         val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1)

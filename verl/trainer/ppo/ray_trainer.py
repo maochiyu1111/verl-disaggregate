@@ -74,6 +74,10 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    EncoderRef = 7
+    EncoderActor = 8
+    LLMRef = 9
+    LLMActor = 10
 
 
 class AdvantageEstimator(str, Enum):
@@ -301,6 +305,8 @@ class RayPPOTrainer:
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
+        self.disaggregate_ref = Role.EncoderRef in role_worker_mapping
+        self.disaggregate_actor = Role.EncoderActor in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.validation_generations_logger = ValidationGenerationsLogger()
 
@@ -692,9 +698,18 @@ class RayPPOTrainer:
         # 在这里还要做修改，在fit里面的ref_wg改成ref_encoder_wg，需要在这里做修改
         # create reference policy if needed
         if self.use_reference_policy:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
-            ref_policy_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RefPolicy], config=self.config.actor_rollout_ref, role="ref")
-            self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
+            if self.disaggregate_ref:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.EncoderRef)
+                # 这个地方的role字段应该是对接fsdp_worker.py中init的role，在其中尚未对ref进行再分，此处应该也不做再分
+                encoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.EncoderRef], config=self.config.actor_rollout_ref, role="ref")
+                self.resource_pool_to_cls[resource_pool]["encoder_ref"] = encoder_ref_cls
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMRef)
+                llm_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.LLMRef], config=self.config.actor_rollout_ref, role="ref")
+                self.resource_pool_to_cls[resource_pool]["llm_ref"] = llm_ref_cls
+            else:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
+                ref_policy_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RefPolicy], config=self.config.actor_rollout_ref, role="ref")
+                self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
         # create a reward model if reward_fn is None
         if self.use_rm:
@@ -727,8 +742,14 @@ class RayPPOTrainer:
             self.critic_wg.init_model()
 
         if self.use_reference_policy:
-            self.ref_policy_wg = all_wg["ref"]
-            self.ref_policy_wg.init_model()
+            if self.disaggregate_ref:
+                self.ref_encoder_wg = all_wg["encoder_ref"]
+                self.ref_llm_wg = all_wg["llm_ref"]
+                self.ref_encoder_wg.init_model()
+                self.ref_llm_wg.init_model()
+            else:
+                self.ref_policy_wg = all_wg["ref"]
+                self.ref_policy_wg.init_model()
 
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
