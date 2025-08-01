@@ -237,31 +237,32 @@ def apply_monkey_patch(
 
     # TODO: VLM models only, unify monkey patch to LLM models.
     if model.config.model_type == "qwen2_5_vl":
-        if is_transformers_version_in_range(min_version="4.53.0"):
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention
+        pass
+        # if is_transformers_version_in_range(min_version="4.53.0"):
+        #     from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention
 
-            # TODO: Support transformers 4.53
-            raise ValueError("Transformers 4.53 is not supported")
-        else:
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-                Qwen2_5_VLFlashAttention2 as Qwen2_5_VLAttention,
-            )
+        #     # TODO: Support transformers 4.53
+        #     raise ValueError("Transformers 4.53 is not supported")
+        # else:
+            # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+            #     Qwen2_5_VLFlashAttention2 as Qwen2_5_VLAttention,
+            # )
 
-        if use_remove_padding or ulysses_sp_size > 1:
-            from verl.models.transformers.qwen2_vl import ulysses_flash_attn_forward
+        # if use_remove_padding or ulysses_sp_size > 1:
+        #     from verl.models.transformers.qwen2_vl import ulysses_flash_attn_forward
 
-            Qwen2_5_VLAttention.forward = ulysses_flash_attn_forward
-            print("Monkey patch FlashAttention2.forward in Qwen2.5VL")
+        #     Qwen2_5_VLAttention.forward = ulysses_flash_attn_forward
+        #     print("Monkey patch FlashAttention2.forward in Qwen2.5VL")
 
-        if ulysses_sp_size > 1:
-            if is_transformers_version_in_range(min_version="4.52.0"):
-                from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
+        # if ulysses_sp_size > 1:
+        #     if is_transformers_version_in_range(min_version="4.52.0"):
+        #         from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
 
-                patch_vlm_for_ulysses_input_slicing(Qwen2_5_VLTextModel)
-            else:
-                from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
+        #         patch_vlm_for_ulysses_input_slicing(Qwen2_5_VLTextModel)
+        #     else:
+        #         from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
 
-                patch_vlm_for_ulysses_input_slicing(Qwen2_5_VLModel)
+        #         patch_vlm_for_ulysses_input_slicing(Qwen2_5_VLModel)
 
     elif model.config.model_type == "qwen2_vl":
         if is_transformers_version_in_range(min_version="4.53.0"):
@@ -341,14 +342,13 @@ def is_transformers_version_in_range(min_version: Optional[str] = None, max_vers
 
 
 
-def apply_monkey_patch_encoder(model: PreTrainedModel):
+def apply_monkey_patch_encoder():
     from verl.models.transformers.qwen2_5_vl import encoder_forward
     from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
     Qwen2_5_VisionTransformerPretrainedModel.encoder_forward = encoder_forward
     
-def apply_monkey_patch_llm(model: PreTrainedModel):
-    from verl.models.transformers.qwen2_5_vl import llm_forward, __init__
+def apply_monkey_patch_llm():
+    from verl.models.transformers.qwen2_5_vl import llm_forward
     from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
-    Qwen2_5_VLModel.__init__ = __init__
     Qwen2_5_VLModel.llm_forward = llm_forward
     

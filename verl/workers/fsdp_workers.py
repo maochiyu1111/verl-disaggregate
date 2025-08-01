@@ -941,12 +941,12 @@ class ActorRolloutRefWorker_encoder(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.role = role
-        assert self.role in ["encode_ref", "encoder_actor"]
+        assert self.role in ["encoder_ref", "encoder_actor"]
 
-        self._is_actor = self.role is "encoder_actor"
+        self._is_actor = self.role == "encoder_actor"
         # 由于actor和rollout一定共享硬件资源（hybrid engine）因此省略encoder_rollout，合并到encoder_actor
-        self._is_rollout = self.role is "encoder_actor"
-        self._is_ref = self.role is "encode_ref"
+        self._is_rollout = self.role == "encoder_actor"
+        self._is_ref = self.role == "encoder_ref"
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
@@ -998,7 +998,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq, Qwen2_5_VisionTransformerPretrainedModel
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
         from verl.utils.torch_dtypes import PrecisionType
@@ -1035,6 +1035,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
             actor_module_class = Qwen2_5_VisionTransformerPretrainedModel
 
             actor_module = actor_module_class.from_pretrained(
@@ -1057,7 +1058,7 @@ class ActorRolloutRefWorker_encoder(Worker):
                 _apply_liger_kernel_to_instance(model=actor_module)
             
             from verl.models.transformers.monkey_patch import apply_monkey_patch_encoder
-            apply_monkey_patch_encoder(model=actor_module)
+            apply_monkey_patch_encoder()
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
@@ -1300,7 +1301,7 @@ class ActorRolloutRefWorker_encoder(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.workers.encoder import DataParallelPPOEncoder
+        from verl.workers.encoder import DataParallelPPOEncoder 
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
@@ -1348,7 +1349,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             OmegaConf.set_struct(self.config.actor, True)
             with open_dict(self.config.actor):
                 self.config.actor.use_remove_padding = use_remove_padding
-            self.actor = DataParallelPPOEncoder(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
+            self.actor = DataParallelPPOEncoder(config=self.config.actor, encoder_module=self.actor_module_fsdp, encoder_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
@@ -1367,7 +1368,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
-            self.ref_policy = DataParallelPPOEncoder(config=self.config.ref, actor_module=self.ref_module_fsdp)
+            self.ref_policy = DataParallelPPOEncoder(config=self.config.ref, encoder_module=self.ref_module_fsdp)
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
@@ -1451,8 +1452,8 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
-        if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
-            self.actor.actor_module._handle.reshard(True)
+        if self.world_size > 1 and fsdp_version(self.actor.encoder_module) == 1:
+            self.actor.encoder_module._handle.reshard(True)
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -1476,7 +1477,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             data = self.ulysses_sharding_manager.preprocess_data(data)
             # output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
             # output = DataProto.from_dict(tensors={"ref_log_prob": output})
-            image_embed, video_embed = self.actor.extract_feature(data=data)
+            image_embed, video_embed = self.ref_policy.extract_feature(data=data)
             output = DataProto.from_dict(tensors={"image_embed": image_embed, "video_embed": video_embed})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
@@ -1484,8 +1485,8 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
-        if self.world_size > 1 and fsdp_version(self.ref_policy.actor_module) == 1:
-            self.ref_policy.actor_module._handle.reshard(True)
+        if self.world_size > 1 and fsdp_version(self.ref_policy.encoder_module) == 1:
+            self.ref_policy.encoder_module._handle.reshard(True)
 
         return output
 
@@ -1551,9 +1552,9 @@ class ActorRolloutRefWorker_llm(Worker):
         # 这部分改动同encoder
         assert self.role in ["llm_ref", "llm_actor"]
 
-        self._is_actor = self.role is "llm_actor"
-        self._is_rollout = self.role is "llm_actor"
-        self._is_ref = self.role is "llm_ref"
+        self._is_actor = self.role == "llm_actor"
+        self._is_rollout = self.role == "llm_actor"
+        self._is_ref = self.role == "llm_ref"
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
@@ -1644,15 +1645,19 @@ class ActorRolloutRefWorker_llm(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            actor_module_class = Qwen2_5_VLTextModel
+            from verl.models.transformers.qwen2_5_vl import CustomQwen2_5_VLModel
+            actor_module_class = CustomQwen2_5_VLModel
 
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
+                # only for disaggregate test
+                torch_dtype=torch.float16,
                 config=actor_model_config,
                 attn_implementation="flash_attention_2",
                 trust_remote_code=trust_remote_code,
             )
+            # 遇到报错，actor_module在meta，fsdp在cuda:0
+            actor_module = actor_module.to_empty(device=torch.device("cuda", torch.cuda.current_device()), recurse=True)
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -1666,8 +1671,7 @@ class ActorRolloutRefWorker_llm(Worker):
                 _apply_liger_kernel_to_instance(model=actor_module)
                 
             from verl.models.transformers.monkey_patch import apply_monkey_patch_llm
-            apply_monkey_patch_llm(model=actor_module)
-
+            apply_monkey_patch_llm()
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
@@ -1692,8 +1696,10 @@ class ActorRolloutRefWorker_llm(Worker):
             buffer_dtype = torch.float32
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
-
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
+        # 由于改了类名，这个地方匹配不到，自行编写config，仅针对本测试的代码
+        wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLDecoderLayer"],}
+        # auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
+        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)
 
         if self._is_rollout and self.config.rollout.name == "hf":
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma

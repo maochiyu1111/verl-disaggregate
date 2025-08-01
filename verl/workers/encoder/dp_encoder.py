@@ -112,11 +112,11 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         micro_batch_size = data.meta_info["micro_batch_size"]
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
-
         if has_multi_modal_inputs:
             num_micro_batches = data.batch.batch_size[0] // micro_batch_size
             non_tensor_select_keys = ["multi_modal_inputs"]
-            micro_batches = data.select(non_tensor_select_keys).chunk(num_micro_batches)
+            # 写法错误AttributeError: 'dict' object has no attribute 'select'，参考dp_actor处理方式，查明是否有use_dynamic_bsz
+            micro_batches = data.non_tensor_batch.select(non_tensor_select_keys).chunk(num_micro_batches)
         else:
             raise NotImplementedError
 

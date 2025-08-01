@@ -23,7 +23,8 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VLCausalLMOutputWithPast,
     Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLTextModel,
-    
+    Qwen2_5_VLModel,
+    Qwen2_5_VLPreTrainedModel,
 )
 
 from transformers.utils import is_torchdynamo_compiling
@@ -357,14 +358,15 @@ def forward_with_triton_backend(
 # for disaggregate
 # forward for LLM
 # patch Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
-def __init__(self, config):
-    super().__init__(config)
-    self.language_model = Qwen2_5_VLTextModel._from_config(config.text_config)
-    self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
-    self.rope_deltas = None  # cache rope_deltas here
+class CustomQwen2_5_VLModel(Qwen2_5_VLModel):
+    def __init__(self, config):
+        Qwen2_5_VLPreTrainedModel.__init__(self, config)
+        self.language_model = Qwen2_5_VLTextModel._from_config(config)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.rope_deltas = None  # cache rope_deltas here
 
-    # Initialize weights and apply final processing
-    self.post_init()
+        # Initialize weights and apply final processing
+        self.post_init()
     
 def llm_forward(
     self,

@@ -130,7 +130,7 @@ class TaskRunner:
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
             assert config.critic.strategy in {"fsdp", "fsdp2"}
             from verl.single_controller.ray import RayWorkerGroup
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker, ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
+            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
 
             actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
@@ -199,6 +199,7 @@ class TaskRunner:
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
             # role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             # mapping[Role.RefPolicy] = ref_id
+            from verl.workers.fsdp_workers import ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
             role_worker_mapping[Role.EncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
             role_worker_mapping[Role.LLMRef] = ray.remote(ActorRolloutRefWorker_llm)
             mapping[Role.EncoderRef] = ref_encoder_id

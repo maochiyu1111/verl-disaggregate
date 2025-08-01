@@ -76,6 +76,10 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    EncoderRef = 7
+    EncoderActor = 8
+    LLMRef = 9
+    LLMActor = 10
 
 
 @dataclass
@@ -352,7 +356,7 @@ class RayPPOTrainer:
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = Role.RefPolicy in role_worker_mapping
+        self.use_reference_policy = Role.RefPolicy in role_worker_mapping or Role.EncoderRef in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.disaggregate_ref = Role.EncoderRef in role_worker_mapping
         self.disaggregate_actor = Role.EncoderActor in role_worker_mapping
@@ -807,11 +811,10 @@ class RayPPOTrainer:
         if self.use_reference_policy:
             if self.disaggregate_ref:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.EncoderRef)
-                # 这个地方的role字段应该是对接fsdp_worker.py中init的role，在其中尚未对ref进行再分，此处应该也不做再分
-                encoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.EncoderRef], config=self.config.actor_rollout_ref, role="ref")
+                encoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.EncoderRef], config=self.config.actor_rollout_ref, role="encoder_ref")
                 self.resource_pool_to_cls[resource_pool]["encoder_ref"] = encoder_ref_cls
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMRef)
-                llm_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.LLMRef], config=self.config.actor_rollout_ref, role="ref")
+                llm_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.LLMRef], config=self.config.actor_rollout_ref, role="llm_ref")
                 self.resource_pool_to_cls[resource_pool]["llm_ref"] = llm_ref_cls
             else:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
