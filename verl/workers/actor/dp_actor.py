@@ -112,6 +112,8 @@ class DataParallelPPOActor(BasePPOActor):
             batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
+            image_embed = torch.cat(micro_batch["image_embed"].tolist(), dim=0) if "image_embed" in micro_batch else None
+            video_embed = torch.cat(micro_batch["video_embed"].tolist(), dim=0) if "video_embed" in micro_batch else None 
             entropy = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
@@ -174,9 +176,7 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
-                if disaggregate:
-                    image_embed = micro_batch["image_embed"]
-                    video_embed = micro_batch["video_embed"]    
+                if disaggregate:  
                     output = self.actor_module.llm_forward(
                         input_ids=input_ids_rmpad,
                         attention_mask=None,
@@ -268,9 +268,7 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
-                if disaggregate:
-                    image_embed = micro_batch["image_embed"]
-                    video_embed = micro_batch["video_embed"]    
+                if disaggregate:   
                     output = self.actor_module.llm_forward(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -417,9 +415,9 @@ class DataParallelPPOActor(BasePPOActor):
         # 改这里，加上image_embed 和 video_embed
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         non_tensor_select_keys = ["multi_modal_inputs"]
-        if "image_embed" in data.batch.keys():
+        if "image_embed" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("image_embed")
-        if "video_embed" in data.batch.keys():
+        if "video_embed" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("video_embed")
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
