@@ -32,8 +32,9 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
+from verl.utils.device import get_device_name
 from verl.utils.py_functional import append_to_dict
-from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
+from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
 from verl.workers.encoder import BasePPOEncoder
@@ -59,6 +60,7 @@ class DataParallelPPOEncoder(BasePPOEncoder):
 
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
+        self.device_name = get_device_name()
 
 
     def _forward_micro_batch(self, micro_batch) -> Tuple[torch.Tensor]:
@@ -66,21 +68,22 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         Returns:
             encoder_embed
         """
-
+        device = torch.device(self.device_name)
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch:
             for key in micro_batch["multi_modal_inputs"][0].keys():
-                multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0)
+                multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0).to(device)
         else:
             raise NotImplementedError
 
-        video_embed, image_embed = self.encoder_module.encoder_forward(
-            **multi_modal_inputs,
-        )  # prevent model thinks we are generating
+        with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+            # from verl.models.transformers.qwen2_5_vl import encoder_forward
+            # image_embed, video_embed = encoder_forward
+            image_embed, video_embed = self.encoder_module.encoder_forward(
+                **multi_modal_inputs,
+            )  # prevent model thinks we are generating
 
-    
-
-        return video_embed, image_embed
+        return  image_embed , video_embed
     
     # qzy note：先不处理encoder需要更新的情况
     # def _optimizer_step(self):
@@ -110,30 +113,42 @@ class DataParallelPPOEncoder(BasePPOEncoder):
 
         # qzy note：目前先保持与actor相同的mbs，后期应做到分离，encoder部分不使用use_dynamic_bsz
         micro_batch_size = data.meta_info["micro_batch_size"]
-
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
-        if has_multi_modal_inputs:
-            num_micro_batches = data.batch.batch_size[0] // micro_batch_size
-            non_tensor_select_keys = ["multi_modal_inputs"]
-            # 写法错误AttributeError: 'dict' object has no attribute 'select'，参考dp_actor处理方式，查明是否有use_dynamic_bsz
-            micro_batches = data.non_tensor_batch.select(non_tensor_select_keys).chunk(num_micro_batches)
-        else:
+        if not has_multi_modal_inputs:
             raise NotImplementedError
+        
+        non_tensor_select_keys = ["multi_modal_inputs"]
+        data = data.select(non_tensor_batch_keys=non_tensor_select_keys)
+        
+        if use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
+        else:
+            micro_batches = data.split(micro_batch_size)        
 
         image_embeds_list = []
         video_embeds_list = []
 
         for micro_batch in micro_batches:
-            if isinstance(micro_batch, DataProto):
-                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                image_embeds, video_embeds = self._forward_micro_batch(micro_batch)
+                image_embeds, video_embeds = self._forward_micro_batch(model_inputs)
             image_embeds_list.append(image_embeds)
             video_embeds_list.append(video_embeds)
 
-        image_embeds = torch.concat(image_embeds_list, dim=0)
-        video_embeds = torch.concat(video_embeds_list, dim=0)
-
+        def flatten_and_concat_embeds(embeds_list: list):
+            # 可能其中一个是None列表
+            if not embeds_list or embeds_list[0] is None:
+                return None
+            flat_embeds = [tensor for tensor_tuple in embeds_list for tensor in tensor_tuple]
+            breakpoint()
+            return torch.concat(flat_embeds, dim=0)
+        
+            
+        image_embeds = flatten_and_concat_embeds(image_embeds_list)
+        video_embeds = flatten_and_concat_embeds(video_embeds_list)
+            
         return image_embeds, video_embeds
 
   

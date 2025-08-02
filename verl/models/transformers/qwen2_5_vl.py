@@ -532,18 +532,19 @@ def encoder_forward(
     video_grid_thw: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
+    image_embeds = None
+    video_embeds = None
+    
     if pixel_values is not None:
-        pixel_values = pixel_values.type(self.visual.dtype)
+        pixel_values = pixel_values.type(self.dtype)
         image_embeds = self(pixel_values, grid_thw=image_grid_thw)
-        split_sizes = (image_grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
+        split_sizes = (image_grid_thw.prod(-1) // self.spatial_merge_size**2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
-        image_embeds = torch.cat(image_embeds, dim=0)
         
     if pixel_values_videos is not None:
-        pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
+        pixel_values_videos = pixel_values_videos.type(self.dtype)
         video_embeds = self(pixel_values_videos, grid_thw=video_grid_thw)
-        split_sizes = (video_grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
+        split_sizes = (video_grid_thw.prod(-1) // self.spatial_merge_size**2).tolist()
         video_embeds = torch.split(video_embeds, split_sizes)
-        video_embeds = torch.cat(video_embeds, dim=0)
         
     return image_embeds, video_embeds

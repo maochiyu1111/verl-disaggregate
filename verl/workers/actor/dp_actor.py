@@ -177,7 +177,7 @@ class DataParallelPPOActor(BasePPOActor):
                 if disaggregate:
                     image_embed = micro_batch["image_embed"]
                     video_embed = micro_batch["video_embed"]    
-                    output = self.actor_module(
+                    output = self.actor_module.llm_forward(
                         input_ids=input_ids_rmpad,
                         attention_mask=None,
                         position_ids=position_ids_rmpad,
@@ -271,7 +271,7 @@ class DataParallelPPOActor(BasePPOActor):
                 if disaggregate:
                     image_embed = micro_batch["image_embed"]
                     video_embed = micro_batch["video_embed"]    
-                    output = self.actor_module(
+                    output = self.actor_module.llm_forward(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         position_ids=position_ids,
@@ -415,9 +415,12 @@ class DataParallelPPOActor(BasePPOActor):
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
 
         # 改这里，加上image_embed 和 video_embed
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "image_embed", "video_embed"]
-        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        if "image_embed" in data.batch.keys():
+            select_keys.append("image_embed")
+        if "video_embed" in data.batch.keys():
+            select_keys.append("video_embed")
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
