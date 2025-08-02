@@ -416,12 +416,11 @@ class DataParallelPPOActor(BasePPOActor):
 
         # 改这里，加上image_embed 和 video_embed
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        non_tensor_select_keys = ["multi_modal_inputs"]
         if "image_embed" in data.batch.keys():
-            select_keys.append("image_embed")
+            non_tensor_select_keys.append("image_embed")
         if "video_embed" in data.batch.keys():
-            select_keys.append("video_embed")
-        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
-        non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
+            non_tensor_select_keys.append("video_embed")
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
         if use_dynamic_bsz:

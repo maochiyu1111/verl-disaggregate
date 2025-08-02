@@ -1479,14 +1479,14 @@ class ActorRolloutRefWorker_encoder(Worker):
             # output = DataProto.from_dict(tensors={"ref_log_prob": output})
             image_embed, video_embed = self.ref_policy.extract_feature(data=data)
             if image_embed is not None and video_embed is not None:
-                tensors = {"image_embed": image_embed, "video_embed": video_embed}
+                embeds = {"image_embed": image_embed, "video_embed": video_embed}
             elif image_embed is not None and video_embed is None:
-                tensors = {"image_embed": image_embed}
+                embeds = {"image_embed": image_embed}
             elif image_embed is None and video_embed is not None:
-                tensors = {"video_embed": video_embed}
+                embeds = {"video_embed": video_embed}
             else:
                 raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
-            output = DataProto.from_dict(tensors=tensors)
+            output = DataProto.from_dict(non_tensors=embeds)
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")

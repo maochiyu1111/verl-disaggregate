@@ -1245,8 +1245,7 @@ class RayPPOTrainer:
                                 # image_embed = encoder_results.batch["image_embed"]
                                 # video_embed = encoder_results.batch["video_embed"]
                                 # union encoder embed
-                                breakpoint()
-                                batch = batch.union(encoder_results)
+                                batch = batch.union_non_tensor(encoder_results)
                                 ref_log_prob = self.ref_llm_wg.compute_ref_log_prob_llm(batch)
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)

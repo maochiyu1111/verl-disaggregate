@@ -684,6 +684,14 @@ class DataProto:
         self.non_tensor_batch = union_numpy_dict(self.non_tensor_batch, other.non_tensor_batch)
         self.meta_info = union_two_dict(self.meta_info, other.meta_info)
         return self
+    
+    def union_non_tensor(self, other: "DataProto") -> "DataProto":
+        """self defined method, aiming at insert encoder_results into batch_data.
+        this method will only consider non_tensor_batch data
+        """
+        self.non_tensor_batch = union_numpy_dict(self.non_tensor_batch, other.non_tensor_batch)
+        return self
+        
 
     def make_iterator(self, mini_batch_size, epochs, seed=None, dataloader_kwargs=None):
         r"""Make an iterator from the DataProto. This is built upon that TensorDict can be used as a normal Pytorch
