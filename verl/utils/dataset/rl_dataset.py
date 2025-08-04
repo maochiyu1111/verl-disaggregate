@@ -190,8 +190,8 @@ class RLHFDataset(Dataset):
                     def doc2len(doc) -> int:
                         messages = self._build_messages(doc)
                         raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-                        images = [process_image(image) for image in messages.pop(image_key)] if image_key in messages else None
-                        videos = [process_video(video) for video in messages.pop(video_key)] if video_key in messages else None
+                        images = [process_image(image) for image in doc[image_key]] if image_key in doc else None
+                        videos = [process_video(video) for video in doc[video_key]] if video_key in doc else None
 
                         return len(processor(text=[raw_prompt], images=images, videos=videos)["input_ids"][0])
 
@@ -349,13 +349,16 @@ class RLHFDataset(Dataset):
                 audio_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|AUDIO|>")
                 self.max_prompt_length += (input_ids[0] == audio_token_id).sum()
                 #max_prompt_length += self.audio_max_length  # audio max_length
+            # for vlm
             else:
                 raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-                images = row_dict.pop(self.image_key)
-                if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):  # image paths
-                    images = [os.path.join(self.image_dir, image) for image in images]
-                #prepare multi-modal data
+                
                 multi_modal_data = {}
+                images = row_dict.get(self.image_key)
+                if self.image_dir is not None and isinstance(images, str):  # image paths
+                    images = [os.path.join(self.image_dir, image) for image in images]
+                    multi_modal_data["image"] = images
+                #prepare multi-modal data
 
                 images = None
                 if self.image_key in row_dict and row_dict.get(self.image_key, None) is not None:
@@ -477,13 +480,13 @@ class RLHFDataset(Dataset):
         row_dict["interaction_kwargs"] = interaction_kwargs
 
         # process answer if have tag, then remove it
-        answer = row_dict.get(self.answer_key,None)
-        if answer is not None:
-            if "<answer>" in answer:
-                match = re.search(r"<answer>(.*?)</answer>", answer)
-                row_dict["ground_truth"] = match.group(1)
-            else:
-                row_dict["ground_truth"] = answer
+        #answer = row_dict.get(self.answer_key,None)
+        #if answer is not None:
+        #    if "<answer>" in answer:
+        #        match = re.search(r"<answer>(.*?)</answer>", answer)
+        #        row_dict["ground_truth"] = match.group(1)
+        #    else:
+        #        row_dict["ground_truth"] = answer
         return row_dict
 
     def __getstate__(self):

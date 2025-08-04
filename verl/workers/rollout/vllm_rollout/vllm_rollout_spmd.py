@@ -268,7 +268,6 @@ class vLLMRollout(BaseRollout):
 
         if "multi_modal_data" in non_tensor_batch:
             vllm_inputs = []
-
             for raw_prompt_ids, multi_modal_data in zip(
                 non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data"), strict=True
             ):

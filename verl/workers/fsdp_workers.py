@@ -268,7 +268,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        if self.config.model.get("is_omni", False) is not False:
+        if "omni" in model_path.lower():
             actor_model_config = Qwen2_5OmniThinkerConfig.from_pretrained(
                 local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2"
             )
@@ -300,7 +300,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            if self.config.model.get("is_omni", False) is not False:
+            if "omni" in model_path.lower():
                 actor_module_class = Qwen2_5OmniThinkerForConditionalGeneration
                 #coio: issue：https://github.com/huggingface/transformers/issues/37663
                 actor_module_class._tp_plan = {} if actor_module_class._tp_plan is None else actor_module_class._tp_plan
@@ -802,7 +802,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperaturef
+        data.meta_info["temperature"] = self.config.rollout.temperature
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
