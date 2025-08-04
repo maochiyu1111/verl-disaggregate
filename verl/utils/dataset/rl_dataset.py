@@ -30,9 +30,11 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
+from qwen_omni_utils import process_mm_info
 
 logger = logging.getLogger(__name__)
 
+QUESTION_TEMPLATE_OMNI = "Please first think deeply about the question based on the given image and audio, and then provide the final answer. The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> the letter of your choice (A, B, C, or D) </answer>.\n\n Question: {question}"
 
 def collate_fn(data_list: list[dict]) -> dict:
     """
@@ -102,6 +104,13 @@ class RLHFDataset(Dataset):
         self.prompt_key = config.get("prompt_key", "prompt")
         self.image_key = config.get("image_key", "images")
         self.video_key = config.get("video_key", "videos")
+        self.audio_key = config.get("audio_key", "audios")
+        self.image_dir = config.get("image_dir", None)
+        self.audio_dir = config.get("audio_dir", None)
+        self.video_dir = config.get("video_dir", None)
+        self.is_omni = config.get("is_omni", False)
+        self.answer_key = config.get("answer_key", "answer")
+        self.use_audio_in_video = config.get("use_audio_in_video", False)
         self.max_prompt_length = config.get("max_prompt_length", 1024)
         self.return_raw_chat = config.get("return_raw_chat", False)
         self.return_full_prompt = config.get("return_full_prompt", False)
@@ -147,22 +156,46 @@ class RLHFDataset(Dataset):
             prompt_key = self.prompt_key
             image_key = self.image_key
             video_key = self.video_key
+            audio_key = self.audio_key
 
             if processor is not None:
                 from verl.utils.dataset.vision_utils import process_image, process_video
+                #from verl.utils.dataset.audio_utils import process_audio
+                '''
+                if processor.feature_extractor_class.__class__.__name__=="WhisperFeatureExtractor":
+                    from qwen_omni_utils import process_mm_info
+                    def doc2len(doc) -> int:
+                        messages = self._build_messages(doc)
+                        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)[0]
 
-                def doc2len(doc) -> int:
-                    messages = self._build_messages(doc)
-                    raw_prompt = self.processor.apply_chat_template(
-                        messages, add_generation_prompt=True, tokenize=False
-                    )
-                    images = [process_image(image) for image in doc[image_key]] if image_key in doc else None
-                    videos = [process_video(video) for video in doc[video_key]] if video_key in doc else None
+                        audios, images, videos, video_kwargs = process_mm_info(messages, use_audio_in_video=True, return_video_kwargs=True)
+                        model_inputs = processor(text=[raw_prompt], images=images, videos=videos, audio=audios, padding=True,
+                                                  return_tensors="pt", use_audio_in_video=True, **video_kwargs)
+                        input_ids = model_inputs.pop("input_ids")[0]
 
-                    return len(processor(text=[raw_prompt], images=images, videos=videos)["input_ids"][0])
+                        return len(input_ids)
+                else:
+                '''
+                #if processor.feature_extractor_class.__class__.__name__=="WhisperFeatureExtractor":
+                if self.is_omni:
+                    def doc2len(doc) -> int:
+                        messages = self._build_messages(doc)
+                        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                        #images = [process_image(image) for image in messages.pop(image_key)] if image_key in messages else None
+                        #videos = [process_video(video) for video in messages.pop(video_key)] if video_key in messages else None
+                        #audios = [process_audio(audio) for audio in messages.pop(audio_key)] if audio_key in messages else None
+                        audios, images, videos = process_mm_info(messages, use_audio_in_video=self.use_audio_in_video)
+                        return len(processor(text=[raw_prompt],audio=audios,images=images, return_tensors="pt")["input_ids"][0])
+                else:
+                    def doc2len(doc) -> int:
+                        messages = self._build_messages(doc)
+                        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                        images = [process_image(image) for image in messages.pop(image_key)] if image_key in messages else None
+                        videos = [process_video(video) for video in messages.pop(video_key)] if video_key in messages else None
+
+                        return len(processor(text=[raw_prompt], images=images, videos=videos)["input_ids"][0])
 
             else:
-
                 def doc2len(doc) -> int:
                     return len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
 
@@ -189,18 +222,89 @@ class RLHFDataset(Dataset):
 
     def _build_messages(self, example: dict):
         messages: list = example.pop(self.prompt_key)
+        
+        if self.is_omni:
+            system_omni = {
+                "role": "system",
+                "content": [
+                    {"type": "text",
+                        "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}
+                ],
+            }
+            prompt_str = QUESTION_TEMPLATE_OMNI.format(question=messages[0]["content"])
 
-        if self.image_key in example or self.video_key in example:
+            #if self.video_dir is not None:  # video paths
+            #    video = os.path.join(self.video_dir, video)
+            #if self.audio_dir is not None:  # audio paths
+            #    audio = os.path.join(self.audio_dir, audio)
+            #messages = [system_omni, {"role": "user", "content": [
+            #    {"type": "video", "video": video, "nframes": self.processor.num_video_frames},
+            #    {"type": "audio", "audio": audio},
+            #    {"type": "text", "text": prompt_str}]}]
+            # 初始化消息内容列表
+            content_parts = []
+
+            if self.image_key in example:
+                images = example[self.image_key]
+                if self.image_dir is not None and isinstance(images, str):  # image paths
+                    images = [os.path.join(self.image_dir, image) for image in images]
+                content_parts.append({
+                    "type": "image", 
+                    "image": images
+                })
+            # 添加视频部分（如果存在）
+            if self.video_key in example:
+                video = example[self.video_key]
+                if self.video_dir is not None:
+                    video = os.path.join(self.video_dir, video)
+                content_parts.append({
+                    "type": "video", 
+                    "video": video,
+                })
+                    #"nframes": self.processor.num_video_frames
+            # 添加音频部分（如果存在）
+            if self.audio_key in example:
+                audio = example[self.audio_key]
+                if self.audio_dir is not None:
+                    audio = os.path.join(self.audio_dir, audio)
+                content_parts.append({
+                    "type": "audio", 
+                    "audio": audio
+                })
+
+            # 总是添加文本部分
+            content_parts.append({
+                "type": "text", 
+                "text": prompt_str
+            })
+
+            # 构建完整的消息结构
+            messages = [
+                system_omni,
+                {
+                    "role": "user",
+                    "content": content_parts
+                }
+            ]
+
+            #if "resized_height" in self.video_hw and "resized_width" in self.video_hw:
+            #    messages[1]["content"][0]["resized_height"] = self.video_hw["resized_height"]
+            #    messages[1]["content"][0]["resized_width"] = self.video_hw["resized_width"]
+            return messages
+            
+        if self.image_key in example or self.video_key in example or self.audio_key in example:
             for message in messages:
                 content = message["content"]
                 content_list = []
-                segments = re.split("(<image>|<video>)", content)
+                segments = re.split("(<image>|<video>|<audio>)", content)
                 segments = [item for item in segments if item != ""]
                 for segment in segments:
                     if segment == "<image>":
                         content_list.append({"type": "image"})
                     elif segment == "<video>":
                         content_list.append({"type": "video"})
+                    elif segment == "<audio>":
+                        content_list.append({"type": "audio"})
                     else:
                         content_list.append({"type": "text", "text": segment})
 
@@ -215,39 +319,70 @@ class RLHFDataset(Dataset):
         row_dict: dict = self.dataframe[item]
         messages = self._build_messages(row_dict)
         model_inputs = {}
-
+        audios = None
+        images = None
+        videos = None
+        video_kwargs = {}
         if self.processor is not None:
             from verl.utils.dataset.vision_utils import process_image, process_video
+            #if self.processor.feature_extractor_class.__class__.__name__=="WhisperFeatureExtractor":
+            if self.is_omni:
+                raw_prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)[0]
+                if self.image_dir is not None:
+                    audios, images, videos, video_kwargs = process_mm_info(messages, use_audio_in_video=self.use_audio_in_video,return_video_kwargs=True)
+                else:
+                    images = [process_image(image) for image in row_dict.pop(self.image_key)]
+                #TBD:support video resize?
+                #if len(videos) > 0 and not "resized_height" in self.video_hw and not "resized_width" in self.video_hw:
+                #    self.video_hw["resized_height"], self.video_hw["resized_width"] = videos[0].size(2), videos[
+                #        0].size(3)
+                model_inputs = self.processor(text=[raw_prompt], audio=audios, images=images, videos=videos, padding=True,
+                                                return_tensors="pt", use_audio_in_video=self.use_audio_in_video, **video_kwargs)
+                input_ids = model_inputs.pop("input_ids")
+                attention_mask = model_inputs.pop("attention_mask")
+                #row_dict["multi_modal_data"] = {"video": videos, "audio": audios, "image": images}
+                row_dict["multi_modal_data"] = {"image": images}
+                audio_feature_length = None
+                if model_inputs.get("feature_attention_mask", None) is not None:
+                    feature_attention_mask = model_inputs.pop("feature_attention_mask")
+                    audio_feature_length = torch.sum(feature_attention_mask, dim=1)
+                audio_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|AUDIO|>")
+                self.max_prompt_length += (input_ids[0] == audio_token_id).sum()
+                #max_prompt_length += self.audio_max_length  # audio max_length
+            else:
+                raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                images = row_dict.pop(self.image_key)
+                if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):  # image paths
+                    images = [os.path.join(self.image_dir, image) for image in images]
+                #prepare multi-modal data
+                multi_modal_data = {}
 
-            raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            multi_modal_data = {}
+                images = None
+                if self.image_key in row_dict and row_dict.get(self.image_key, None) is not None:
+                    images = [process_image(image) for image in row_dict.pop(self.image_key)]
 
-            images = None
-            if self.image_key in row_dict and row_dict.get(self.image_key, None) is not None:
-                images = [process_image(image) for image in row_dict.pop(self.image_key)]
+                    # due to the image key is "image" instead of "images" in vllm, we need to use "image" here
+                    # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205
+                    multi_modal_data["image"] = images
 
-                # due to the image key is "image" instead of "images" in vllm, we need to use "image" here
-                # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205
-                multi_modal_data["image"] = images
+                videos = None
+                if self.video_key in row_dict and row_dict.get(self.video_key, None) is not None:
+                    videos = [process_video(video) for video in row_dict.pop(self.video_key)]
 
-            videos = None
-            if self.video_key in row_dict and row_dict.get(self.video_key, None) is not None:
-                videos = [process_video(video) for video in row_dict.pop(self.video_key)]
+                    # due to the video key is "video" instead of "videos" in vllm, we need to use "video" here
+                    # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205
+                    multi_modal_data["video"] = [video.numpy() for video in videos]
 
-                # due to the video key is "video" instead of "videos" in vllm, we need to use "video" here
-                # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205
-                multi_modal_data["video"] = [video.numpy() for video in videos]
+                model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
 
-            model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
+                input_ids = model_inputs.pop("input_ids")
+                attention_mask = model_inputs.pop("attention_mask")
 
-            input_ids = model_inputs.pop("input_ids")
-            attention_mask = model_inputs.pop("attention_mask")
+                if "second_per_grid_ts" in model_inputs:
+                    model_inputs.pop("second_per_grid_ts")
 
-            if "second_per_grid_ts" in model_inputs:
-                model_inputs.pop("second_per_grid_ts")
-
-            # There's a trap here, multi_modal_inputs has to be a dict, not BatchFeature
-            row_dict["multi_modal_data"] = multi_modal_data
+                # There's a trap here, multi_modal_inputs has to be a dict, not BatchFeature
+                row_dict["multi_modal_data"] = multi_modal_data
 
             # We will do batch.union() in the trainer,
             # so we cannot have "multi_modal_inputs" in row_dict if rollout generates new multi_modal_inputs
@@ -257,12 +392,13 @@ class RLHFDataset(Dataset):
                 # second_per_grid_ts isn't used for training, just for mrope
                 row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
+        
         else:
             raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
-
+        
         input_ids, attention_mask = verl_F.postprocess_data(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -271,10 +407,21 @@ class RLHFDataset(Dataset):
             left_pad=True,
             truncation=self.truncation,
         )
-
-        if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
+        #coio:have bugs when Omni use Qwen2VLImageProcessor as well
+        if self.processor is not None and self.config.get("is_omni", False) is not False:
+            from verl.models.transformers.qwen2_5_omni import get_rope_index_omni
+            position_ids, mrope_position_deltas = get_rope_index_omni(
+                    self.processor,
+                    input_ids=input_ids[0],
+                    image_grid_thw=model_inputs.get("image_grid_thw"),
+                    video_grid_thw=model_inputs.get("video_grid_thw"),
+                    second_per_grids=model_inputs.get("second_per_grid_ts"),
+                    attention_mask=attention_mask[0],
+                    use_audio_in_video=self.config.get("use_audio_in_video", False),
+                    audio_seqlens=audio_feature_length,
+                )
+        elif self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
             from verl.models.transformers.qwen2_vl import get_rope_index
-
             position_ids = [
                 get_rope_index(
                     self.processor,
@@ -285,10 +432,13 @@ class RLHFDataset(Dataset):
                     attention_mask=attention_mask[0],
                 )
             ]  # (1, 3, seq_len)
-
         else:
             position_ids = compute_position_id_with_mask(attention_mask)
-
+        """
+        elif self.processor is not None and "Qwen2_5OmniProcessor" in self.processor.image_processor.__class__.__name__:
+            from verl.models.transformers.qwen2_5_omni import get_rope_index
+        """
+        
         row_dict["input_ids"] = input_ids[0]
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
@@ -325,6 +475,15 @@ class RLHFDataset(Dataset):
         row_dict["index"] = index
         row_dict["tools_kwargs"] = tools_kwargs
         row_dict["interaction_kwargs"] = interaction_kwargs
+
+        # process answer if have tag, then remove it
+        answer = row_dict.get(self.answer_key,None)
+        if answer is not None:
+            if "<answer>" in answer:
+                match = re.search(r"<answer>(.*?)</answer>", answer)
+                row_dict["ground_truth"] = match.group(1)
+            else:
+                row_dict["ground_truth"] = answer
         return row_dict
 
     def __getstate__(self):

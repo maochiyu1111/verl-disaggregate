@@ -35,6 +35,19 @@ from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForTokenClassification,
+    AutoModelForVision2Seq,
+    AutoModel,
+)
+from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
+    Qwen2_5OmniConfig, Qwen2_5OmniThinkerConfig)
+from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
+    Qwen2_5OmniProcessor)
+from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniPreTrainedModel, Qwen2_5OmniPreTrainedModelForConditionalGeneration,Qwen2_5OmniThinkerForConditionalGeneration
+
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -255,9 +268,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(
-            local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2"
-        )
+        if self.config.model.get("is_omni", False) is not False:
+            actor_model_config = Qwen2_5OmniThinkerConfig.from_pretrained(
+                local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2"
+            )
+        else:
+            actor_model_config = AutoConfig.from_pretrained(
+                local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2"
+            )
 
         # patch for kimi-vl
         if getattr(actor_model_config, "model_type", None) == "kimi_vl":
@@ -282,7 +300,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
+            if self.config.model.get("is_omni", False) is not False:
+                actor_module_class = Qwen2_5OmniThinkerForConditionalGeneration
+                #coio: issue：https://github.com/huggingface/transformers/issues/37663
+                actor_module_class._tp_plan = {} if actor_module_class._tp_plan is None else actor_module_class._tp_plan
+            
+                self.generation_config.bos_token_id = "null"
+                self.generation_config.eos_token_id = 151645
+                self.generation_config.pad_token_id = 151643
+            elif type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
                 actor_module_class = AutoModelForVision2Seq
             else:
                 actor_module_class = AutoModelForCausalLM
@@ -776,7 +802,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["temperature"] = self.config.rollout.temperaturef
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
