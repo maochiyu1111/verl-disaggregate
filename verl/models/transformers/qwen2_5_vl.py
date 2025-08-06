@@ -359,6 +359,7 @@ def forward_with_triton_backend(
 # forward for LLM
 # patch Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
 class CustomQwen2_5_VLModel(Qwen2_5_VLModel):
+    _tied_weights_keys = ["lm_head.weight"]
     def __init__(self, config):
         Qwen2_5_VLPreTrainedModel.__init__(self, config)
         self.language_model = Qwen2_5_VLTextModel._from_config(config)
