@@ -819,11 +819,11 @@ class RayPPOTrainer:
             else:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
                 ref_policy_cls = RayClassWithInitArgs(
-                self.role_worker_mapping[Role.RefPolicy],
-                config=self.config.actor_rollout_ref,
-                role="ref",
-                profile_option=self.config.trainer.npu_profile.options,
-            )
+                    self.role_worker_mapping[Role.RefPolicy],
+                    config=self.config.actor_rollout_ref,
+                    role="ref",
+                    profile_option=self.config.trainer.npu_profile.options,
+                )
                 self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
         # create a reward model if reward_fn is None
@@ -1241,12 +1241,15 @@ class RayPPOTrainer:
                         # compute reference log_prob
                         with marked_timer("ref", timing_raw, color="olive"):
                             if not self.ref_in_actor:
-                                encoder_results = self.ref_encoder_wg.compute_ref_log_prob_encoder(batch)
-                                # image_embed = encoder_results.batch["image_embed"]
-                                # video_embed = encoder_results.batch["video_embed"]
-                                # union encoder embed
-                                batch = batch.union_non_tensor(encoder_results)
-                                ref_log_prob = self.ref_llm_wg.compute_ref_log_prob_llm(batch)
+                                if self.disaggregate_ref:
+                                    encoder_results = self.ref_encoder_wg.compute_ref_log_prob_encoder(batch)
+                                    # image_embed = encoder_results.batch["image_embed"]
+                                    # video_embed = encoder_results.batch["video_embed"]
+                                    # union encoder embed
+                                    batch = batch.union_non_tensor(encoder_results)
+                                    ref_log_prob = self.ref_llm_wg.compute_ref_log_prob_llm(batch)
+                                else:
+                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)

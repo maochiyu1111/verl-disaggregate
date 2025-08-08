@@ -40,8 +40,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-    trainer.project_name='0806_verl_qwen2_5_vl_3b' \
-    trainer.experiment_name='0806_verl_qwen2_5_vl_3b' \
+    trainer.project_name='0807_verl_qwen2_5_vl_3b' \
+    trainer.experiment_name='0807_verl_qwen2_5_vl_3b' \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
