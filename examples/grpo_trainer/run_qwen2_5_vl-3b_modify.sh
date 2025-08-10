@@ -8,7 +8,6 @@ python3 -m verl.trainer.main_ppo \
     data.train_files=/workspace/datasets/geometry3k/train.parquet \
     data.val_files=/workspace/datasets/geometry3k/test.parquet \
     data.train_batch_size=96 \
-    data.max_prompt_length=1024 \
     data.max_response_length=200 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \

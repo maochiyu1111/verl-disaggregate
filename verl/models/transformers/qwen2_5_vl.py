@@ -415,6 +415,7 @@ def llm_forward(
 
     if pixel_values is not None:
         image_embeds = image_embed
+        # breakpoint()
 
         if input_ids is None:
             image_mask = inputs_embeds == self.get_input_embeddings()(

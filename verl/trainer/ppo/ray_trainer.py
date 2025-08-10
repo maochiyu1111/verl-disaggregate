@@ -809,22 +809,21 @@ class RayPPOTrainer:
         # 在这里还要做修改，在fit里面的ref_wg改成ref_encoder_wg，需要在这里做修改
         # create reference policy if needed
         if self.use_reference_policy:
-            if self.disaggregate_ref:
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.EncoderRef)
-                encoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.EncoderRef], config=self.config.actor_rollout_ref, role="encoder_ref")
-                self.resource_pool_to_cls[resource_pool]["encoder_ref"] = encoder_ref_cls
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMRef)
-                llm_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.LLMRef], config=self.config.actor_rollout_ref, role="llm_ref")
-                self.resource_pool_to_cls[resource_pool]["llm_ref"] = llm_ref_cls
-            else:
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
-                ref_policy_cls = RayClassWithInitArgs(
-                    self.role_worker_mapping[Role.RefPolicy],
-                    config=self.config.actor_rollout_ref,
-                    role="ref",
-                    profile_option=self.config.trainer.npu_profile.options,
-                )
-                self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.EncoderRef)
+            encoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.EncoderRef], config=self.config.actor_rollout_ref, role="encoder_ref")
+            self.resource_pool_to_cls[resource_pool]["encoder_ref"] = encoder_ref_cls
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMRef)
+            llm_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.LLMRef], config=self.config.actor_rollout_ref, role="llm_ref")
+            self.resource_pool_to_cls[resource_pool]["llm_ref"] = llm_ref_cls
+
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
+            ref_policy_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.RefPolicy],
+                config=self.config.actor_rollout_ref,
+                role="ref",
+                profile_option=self.config.trainer.npu_profile.options,
+            )
+            self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
 
         # create a reward model if reward_fn is None
         if self.use_rm:
@@ -867,14 +866,13 @@ class RayPPOTrainer:
             self.critic_wg.init_model()
 
         if self.use_reference_policy and not self.ref_in_actor:
-            if self.disaggregate_ref:
-                self.ref_encoder_wg = all_wg["encoder_ref"]
-                self.ref_llm_wg = all_wg["llm_ref"]
-                self.ref_encoder_wg.init_model()
-                self.ref_llm_wg.init_model()
-            else:
-                self.ref_policy_wg = all_wg["ref"]
-                self.ref_policy_wg.init_model()
+            self.ref_encoder_wg = all_wg["encoder_ref"]
+            self.ref_llm_wg = all_wg["llm_ref"]
+            self.ref_encoder_wg.init_model()
+            self.ref_llm_wg.init_model()
+
+            self.ref_policy_wg = all_wg["ref"]
+            self.ref_policy_wg.init_model()
 
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
@@ -1241,15 +1239,19 @@ class RayPPOTrainer:
                         # compute reference log_prob
                         with marked_timer("ref", timing_raw, color="olive"):
                             if not self.ref_in_actor:
-                                if self.disaggregate_ref:
-                                    encoder_results = self.ref_encoder_wg.compute_ref_log_prob_encoder(batch)
-                                    # image_embed = encoder_results.batch["image_embed"]
-                                    # video_embed = encoder_results.batch["video_embed"]
-                                    # union encoder embed
-                                    batch = batch.union_non_tensor(encoder_results)
-                                    ref_log_prob = self.ref_llm_wg.compute_ref_log_prob_llm(batch)
-                                else:
-                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                breakpoint()
+                                encoder_results = self.ref_encoder_wg.compute_ref_log_prob_encoder(batch)
+                                # image_embed = encoder_results.batch["image_embed"]
+                                # video_embed = encoder_results.batch["video_embed"]
+                                # union encoder embed
+                                new_batch = batch.union_non_tensor(encoder_results)
+                                ref_log_prob_dis = self.ref_llm_wg.compute_ref_log_prob_llm(new_batch)
+                                
+                                ref_log_prob_agg = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                tensor1 = ref_log_prob_agg.batch["ref_log_prob"]
+                                tensor2 = ref_log_prob_dis.batch["ref_log_prob"]
+                                is_close = torch.allclose(tensor1, tensor2, rtol=1e-5, atol=1e-8)
+                                breakpoint()
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
