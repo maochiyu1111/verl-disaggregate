@@ -177,7 +177,7 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["return_dict"] = True
 
                 if disaggregate:  
-                    output = self.actor_module.llm_forward(
+                    output = self.actor_module(
                         input_ids=input_ids_rmpad,
                         attention_mask=None,
                         position_ids=position_ids_rmpad,
