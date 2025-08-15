@@ -858,11 +858,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
+        # fix by https://github.com/volcengine/verl/pull/2941
         if self.world_size > 1:
             if fsdp_version(self.ref_policy.actor_module) == 1:
                 self.ref_policy.actor_module._handle.reshard(True)
             elif fsdp_version(self.ref_policy.actor_module) == 2:
-                self.ref_policy.actor_module.shard()
+                self.ref_policy.actor_module.reshard() #need to be reshard for fsdp2
 
         return output
 
