@@ -941,11 +941,10 @@ class ActorRolloutRefWorker_encoder(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.role = role
-        assert self.role in ["encoder_ref", "encoder_actor"]
+        assert self.role in ["encoder_ref", "encoder_actor_rollout"]
 
-        self._is_actor = self.role == "encoder_actor"
-        # 由于actor和rollout一定共享硬件资源（hybrid engine）因此省略encoder_rollout，合并到encoder_actor
-        self._is_rollout = self.role == "encoder_actor"
+        self._is_actor = self.role == "encoder_actor_rollout"
+        self._is_rollout = self.role == "encoder_actor_rollout"
         self._is_ref = self.role == "encoder_ref"
 
         self._is_offload_param = False
@@ -1381,7 +1380,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def update_actor(self, data: DataProto):
+    def update_actor(self, data: dict):
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
 
@@ -1391,28 +1390,29 @@ class ActorRolloutRefWorker_encoder(Worker):
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
 
-        with self.ulysses_sharding_manager:
-            data = self.ulysses_sharding_manager.preprocess_data(data=data)
+        # with self.ulysses_sharding_manager:
+            # data = self.ulysses_sharding_manager.preprocess_data(data=data)
             # perform training
-            with Timer(name="update_policy", logger=None) as timer:
-                metrics = self.actor.update_policy(data=data)
-            delta_time = timer.last
-            global_num_tokens = data.meta_info["global_token_num"]
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-            metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
-            metrics["perf/max_memory_allocated_gb"] = torch.cuda.max_memory_allocated() / (1024**3)
-            metrics["perf/max_memory_reserved_gb"] = torch.cuda.max_memory_reserved() / (1024**3)
-            metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
+            # with Timer(name="update_policy", logger=None) as timer:
+            # metrics = self.actor.update_policy(data=data)
+        self.actor.update_policy(data=data)
+            # delta_time = timer.last
+            # global_num_tokens = data.meta_info["global_token_num"]
+            # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            # metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            # metrics["perf/max_memory_allocated_gb"] = torch.cuda.max_memory_allocated() / (1024**3)
+            # metrics["perf/max_memory_reserved_gb"] = torch.cuda.max_memory_reserved() / (1024**3)
+            # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
-            self.actor_lr_scheduler.step()
-            lr = self.actor_lr_scheduler.get_last_lr()[0]
-            metrics["actor/lr"] = lr
+        self.actor_lr_scheduler.step()
+            # lr = self.actor_lr_scheduler.get_last_lr()[0]
+            # metrics["actor/lr"] = lr
 
             # TODO: here, we should return all metrics
-            output = DataProto(meta_info={"metrics": metrics})
+            # output = DataProto(meta_info={"metrics": metrics})
 
-            output = self.ulysses_sharding_manager.postprocess_data(data=output)
-            output = output.to("cpu")
+            # output = self.ulysses_sharding_manager.postprocess_data(data=output)
+            # output = output.to("cpu")
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -1421,7 +1421,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
-        return output
+        # return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob_encoder(self, data: DataProto):
@@ -1558,10 +1558,10 @@ class ActorRolloutRefWorker_llm(Worker):
 
         self.role = role
         # 这部分改动同encoder
-        assert self.role in ["llm_ref", "llm_actor"]
+        assert self.role in ["llm_ref", "llm_actor_rollout"]
 
-        self._is_actor = self.role == "llm_actor"
-        self._is_rollout = self.role == "llm_actor"
+        self._is_actor = self.role == "llm_actor_rollout"
+        self._is_rollout = self.role == "llm_actor_rollout"
         self._is_ref = self.role == "llm_ref"
 
         self._is_offload_param = False
@@ -2015,7 +2015,7 @@ class ActorRolloutRefWorker_llm(Worker):
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
             # perform training
             with Timer(name="update_policy", logger=None) as timer:
-                metrics = self.actor.update_policy(data=data)
+                metrics, encoder_gradients = self.actor.update_policy_llm(data=data)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
@@ -2033,6 +2033,7 @@ class ActorRolloutRefWorker_llm(Worker):
 
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
             output = output.to("cpu")
+            encoder_gradients = encoder_gradients.to("cpu")
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -2041,7 +2042,7 @@ class ActorRolloutRefWorker_llm(Worker):
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
-        return output
+        return output, encoder_gradients
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):

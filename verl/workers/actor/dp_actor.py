@@ -88,7 +88,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False, disaggregate=False
+        self, micro_batch, temperature, calculate_entropy=False, disaggregate=False, encoder_grad=False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -114,6 +114,9 @@ class DataParallelPPOActor(BasePPOActor):
             position_ids = micro_batch["position_ids"]
             image_embed = torch.cat(micro_batch["image_embed"].tolist(), dim=0) if "image_embed" in micro_batch else None
             video_embed = torch.cat(micro_batch["video_embed"].tolist(), dim=0) if "video_embed" in micro_batch else None 
+            if encoder_grad:
+                self.current_image_embed = image_embed
+                self.current_video_embed = video_embed
             entropy = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
@@ -568,3 +571,143 @@ class DataParallelPPOActor(BasePPOActor):
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics
+
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def update_policy_llm(self, data: DataProto):
+        # make sure we are in training mode
+        self.actor_module.train()
+
+        temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+
+        select_keys = [
+            "responses",
+            "response_mask",
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "old_log_probs",
+            "advantages",
+        ]
+        if self.config.use_kl_loss:
+            select_keys.append("ref_log_prob")
+
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
+        if "image_embed" in data.non_tensor_batch.keys():
+            non_tensor_select_keys.append("image_embed")
+        if "video_embed" in data.non_tensor_batch.keys():
+            non_tensor_select_keys.append("video_embed")
+
+        data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
+
+        # Split to make minibatch iterator for updating the actor
+        # See PPO paper for details. https://arxiv.org/abs/1707.06347
+        mini_batches = data.split(self.config.ppo_mini_batch_size)
+
+        metrics = {}
+        image_embed_grad_list = []
+        video_embed_grad_list = []
+        for _ in range(self.config.ppo_epochs):
+            for batch_idx, mini_batch in enumerate(mini_batches):
+                if self.config.use_dynamic_bsz:
+                    max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                    micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
+                else:
+                    self.gradient_accumulation = (
+                        self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                    )
+                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+
+                self.actor_optimizer.zero_grad()
+
+                for micro_batch in micro_batches:
+                    micro_batch_metrics = {}
+                    model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+                    response_mask = model_inputs["response_mask"]
+                    old_log_prob = model_inputs["old_log_probs"]
+                    advantages = model_inputs["advantages"]
+
+                    entropy_coeff = self.config.entropy_coeff
+                    loss_agg_mode = self.config.loss_agg_mode
+
+                    # all return: (bsz, response_length)
+                    calculate_entropy = False
+                    if entropy_coeff != 0:
+                        calculate_entropy = True
+                    entropy, log_prob = self._forward_micro_batch(
+                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, disaggregate=True, encoder_grad=True
+                    )
+
+                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                    # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
+                    # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
+                    # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
+                    policy_loss_fn = get_policy_loss_fn(loss_mode)
+                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        config=self.config,
+                    )
+
+                    if entropy_coeff != 0:
+                        entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+                        # compute policy loss
+                        policy_loss = pg_loss - entropy_loss * entropy_coeff
+                    else:
+                        policy_loss = pg_loss
+
+                    if self.config.use_kl_loss:
+                        ref_log_prob = model_inputs["ref_log_prob"]
+                        # compute kl loss
+                        kld = kl_penalty(
+                            logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
+                        )
+                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+                        policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
+                        micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item()
+                        micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    if self.config.use_dynamic_bsz:
+                        # relative to the dynamic bsz
+                        loss = policy_loss * (response_mask.shape[0] / self.config.ppo_mini_batch_size)
+                    else:
+                        loss = policy_loss / self.gradient_accumulation
+                    loss.backward()
+
+                    if hasattr(self, 'current_image_embed'):
+                        image_embed_grad = self.current_image_embed.grad
+                        image_embed_grad_list.append(image_embed_grad)
+                    if hasattr(self, 'current_video_embed'):
+                        video_embed_grad = self.current_video_embed.grad
+                        video_embed_grad_list.append(video_embed_grad)
+                    
+                    micro_batch_metrics.update(
+                        {
+                            "actor/pg_loss": pg_loss.detach().item(),
+                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                            "actor/ppo_kl": ppo_kl.detach().item(),
+                            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                        }
+                    )
+                    append_to_dict(metrics, micro_batch_metrics)
+
+                grad_norm = self._optimizer_step()
+                mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                append_to_dict(metrics, mini_batch_metrics)
+    
+        if image_embed_grad_list[0] is not None and video_embed_grad_list[0] is not None:
+            encoder_gradients = {"image_embed_grad_list": image_embed_grad_list, "video_embed_grad_list": video_embed_grad_list}
+        elif image_embed_grad_list[0]  is not None and video_embed_grad_list[0] is None:
+            encoder_gradients = {"image_embed_grad_list": image_embed_grad_list}
+        elif image_embed_grad_list[0] is None and video_embed_grad_list[0] is not None:
+            encoder_gradients = {"video_embed_grad_list": video_embed_grad_list}
+        else:
+            raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
+        self.actor_optimizer.zero_grad()
+        return metrics, encoder_gradients

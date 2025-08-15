@@ -77,9 +77,9 @@ class Role(Enum):
     RewardModel = 5
     ActorRolloutRef = 6
     EncoderRef = 7
-    EncoderActor = 8
+    EncoderActorRollout = 8
     LLMRef = 9
-    LLMActor = 10
+    LLMActorRollout = 10
 
 
 @dataclass
@@ -359,7 +359,7 @@ class RayPPOTrainer:
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping or Role.EncoderRef in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.disaggregate_ref = Role.EncoderRef in role_worker_mapping
-        self.disaggregate_actor = Role.EncoderActor in role_worker_mapping
+        self.disaggregate_actor_rollout = Role.EncoderActorRollout in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -788,14 +788,33 @@ class RayPPOTrainer:
 
         # create actor and rollout
         if self.hybrid_engine:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
-            actor_rollout_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.ActorRollout],
-                config=self.config.actor_rollout_ref,
-                role="actor_rollout",
-                profile_option=self.config.trainer.npu_profile.options,
-            )
-            self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
+            if self.disaggregate_actor_rollout:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.EncoderActorRollout)
+                encoder_ref_cls =  RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.EncoderActorRollout],
+                    config=self.config.actor_rollout_ref,
+                    role="encoder_actor_rollout",
+                    profile_option=self.config.trainer.npu_profile.options,
+                )
+                self.resource_pool_to_cls[resource_pool]["encoder_actor_rollout"] = encoder_ref_cls
+                
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMActorRollout)
+                llm_ref_cls =  RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.LLMActorRollout],
+                    config=self.config.actor_rollout_ref,
+                    role="llm_actor_rollout",
+                    profile_option=self.config.trainer.npu_profile.options,
+                )
+                self.resource_pool_to_cls[resource_pool]["llm_actor_rollout"] = llm_ref_cls                
+            else:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
+                actor_rollout_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.ActorRollout],
+                    config=self.config.actor_rollout_ref,
+                    role="actor_rollout",
+                    profile_option=self.config.trainer.npu_profile.options,
+                )
+                self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
         else:
             raise NotImplementedError
 
@@ -881,8 +900,14 @@ class RayPPOTrainer:
             self.rm_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg["actor_rollout"]
-        self.actor_rollout_wg.init_model()
+        if self.disaggregate_actor_rollout:
+            self.actor_rollout_encoder_wg = all_wg["encoder_actor_rollout"]
+            self.actor_rollout_llm_wg = all_wg["llm_actor_rollout"]
+            self.actor_rollout_encoder_wg.init_model()
+            self.actor_rollout_llm_wg.init_model()
+        else:
+            self.actor_rollout_wg = all_wg["actor_rollout"]
+            self.actor_rollout_wg.init_model()
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -1307,7 +1332,11 @@ class RayPPOTrainer:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                            # actor_output = self.actor_rollout_wg.update_actor(batch)
+                            encoder_embed = self.actor_rollout_encoder_wg.extract_feature_train(batch)
+                            batch = batch.union_non_tensor(encoder_embed)
+                            actor_output, encoder_gradients = self.actor_rollout_llm_wg.update_actor(batch)
+                            self.actor_rollout_encoder_wg.update_actor(encoder_gradients)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

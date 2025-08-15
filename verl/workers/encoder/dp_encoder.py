@@ -85,24 +85,23 @@ class DataParallelPPOEncoder(BasePPOEncoder):
 
         return  image_embed , video_embed
     
-    # qzy note：先不处理encoder需要更新的情况
-    # def _optimizer_step(self):
-    #     assert self.config.grad_clip is not None
+    def _optimizer_step(self):
+        assert self.config.grad_clip is not None
 
-    #     if isinstance(self.Encoder_module, FSDP):
-    #         grad_norm = self.Encoder_module.clip_grad_norm_(max_norm=self.config.grad_clip)
-    #     elif isinstance(self.Encoder_module, FSDPModule):
-    #         grad_norm = fsdp2_clip_grad_norm_(self.Encoder_module.parameters(), max_norm=self.config.grad_clip)
-    #     else:
-    #         grad_norm = torch.nn.utils.clip_grad_norm_(self.Encoder_module.parameters(), max_norm=self.config.grad_clip)
+        if isinstance(self.encoder_module, FSDP):
+            grad_norm = self.encoder_module.clip_grad_norm_(max_norm=self.config.grad_clip)
+        elif isinstance(self.encoder_module, FSDPModule):
+            grad_norm = fsdp2_clip_grad_norm_(self.encoder_module.parameters(), max_norm=self.config.grad_clip)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.encoder_module.parameters(), max_norm=self.config.grad_clip)
 
-    #     # if grad_norm is not finite, skip the update
-    #     if not torch.isfinite(grad_norm):
-    #         print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
-    #         self.Encoder_optimizer.zero_grad()
-    #     else:
-    #         self.Encoder_optimizer.step()
-    #     return grad_norm
+        # if grad_norm is not finite, skip the update
+        if not torch.isfinite(grad_norm):
+            print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
+            self.encoder_optimizer.zero_grad()
+        else:
+            self.encoder_optimizer.step()
+        return grad_norm
 
     @GPUMemoryLogger(role="dp Encoder", logger=logger)
     def extract_feature(self, data: DataProto) -> torch.Tensor:
@@ -149,5 +148,99 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         video_embeds = flatten_embeds(video_embeds_list)
             
         return image_embeds, video_embeds
+    
+    @GPUMemoryLogger(role="dp Encoder", logger=logger)
+    def extract_feature_train(self, data: DataProto) -> torch.Tensor:
+        """extract features given a batch of data
+        """
+        # set to train
+        self.encoder_module.train()
 
-  
+        # qzy note：目前先保持与actor相同的mbs，后期应做到分离，encoder部分不使用use_dynamic_bsz
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        if not has_multi_modal_inputs:
+            raise NotImplementedError
+        
+        non_tensor_select_keys = ["multi_modal_inputs"]
+        data = data.select(non_tensor_batch_keys=non_tensor_select_keys)
+        mini_batches = data.split(self.config.ppo_mini_batch_size)     
+
+        self.image_embeds_list = []
+        self.video_embeds_list = []
+        for batch_idx, mini_batch in enumerate(mini_batches):
+            self.gradient_accumulation = (
+                self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+            )
+            micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+            for micro_batch in micro_batches:
+                model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+                with torch.enable_grad():
+                    image_embeds, video_embeds = self._forward_micro_batch(model_inputs)
+                self.image_embeds_list.append(image_embeds)
+                self.video_embeds_list.append(video_embeds)
+
+        def flatten_embeds(embeds_list: list):
+            # 可能其中一个是None列表
+            if not embeds_list or embeds_list[0] is None:
+                return None
+            return [tensor.cpu() for tensor_tuple in embeds_list for tensor in tensor_tuple]
+        
+            
+        image_embeds = flatten_embeds(self.image_embeds_list)
+        video_embeds = flatten_embeds(self.video_embeds_list)
+            
+        return image_embeds, video_embeds
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def update_policy(self, data: dict):
+        # make sure we are in training mode
+        # 想方法拿到每个microbatch的gradient
+        self.encoder_module.train()
+        
+        mini_batch_size = self.config.ppo_mini_batch_size
+        mini_batches = []
+        # mini_batches = data.split(self.config.ppo_mini_batch_size)
+        total_length = len(next(iter(data.values())))
+        for i in range(0, total_length, mini_batch_size):
+            mini_batch = {key: values[i : i + mini_batch_size] for key, values in data.items()}
+            mini_batches.append(mini_batch)
+            
+        # metrics = {}
+        for _ in range(self.config.ppo_epochs):
+            global_index = 0
+            for mini_batch in mini_batches:
+                
+                self.gradient_accumulation = (
+                    self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                )
+                # micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+                micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
+                micro_batches = []
+                mini_total_length = len(next(iter(mini_batch.values())))
+                for i in range(0, mini_total_length, micro_batch_size):
+                    micro_batch = {key: values[i : i + micro_batch_size] for key, values in mini_batch.items()}
+                    micro_batches.append(micro_batch)
+
+                self.encoder_optimizer.zero_grad()
+
+                for micro_batch in micro_batches:
+                    current_image_embed = self.image_embeds_list[global_index]
+                    current_video_embed = self.video_embeds_list[global_index]
+                    image_grad = micro_batch.get("image_embed_grad_list", None)
+                    video_grad = micro_batch.get("video_embed_grad_list", None)
+                    if current_image_embed is not None and image_grad is not None:
+                        assert current_image_embed.shape == image_grad.shape
+                        current_image_embed.backward(gradient=image_grad, retain_graph=True)
+                    if current_video_embed is not None and video_grad is not None:
+                        assert current_video_embed.shape == video_grad.shape
+                        current_video_embed.backward(gradient=video_grad)
+                    global_index += 1
+
+                grad_norm = self._optimizer_step()
+                # 先不传入这部分的gradient
+                # mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                # append_to_dict(metrics, mini_batch_metrics)
+        self.image_embeds_list.clear()
+        self.video_embeds_list.clear()
+        self.encoder_optimizer.zero_grad()
+        # return metrics
