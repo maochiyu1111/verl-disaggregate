@@ -179,17 +179,17 @@ class DataParallelPPOEncoder(BasePPOEncoder):
                 self.image_embeds_list.append(image_embeds)
                 self.video_embeds_list.append(video_embeds)
 
-        def flatten_embeds(embeds_list: list):
-            # 可能其中一个是None列表
-            if not embeds_list or embeds_list[0] is None:
-                return None
-            return [tensor.cpu() for tensor_tuple in embeds_list for tensor in tensor_tuple]
+        # def flatten_embeds(embeds_list: list):
+        #     # 可能其中一个是None列表
+        #     if not embeds_list or embeds_list[0] is None:
+        #         return None
+        #     return [tensor.cpu() for tensor_tuple in embeds_list for tensor in tensor_tuple]
         
             
-        image_embeds = flatten_embeds(self.image_embeds_list)
-        video_embeds = flatten_embeds(self.video_embeds_list)
+        # image_embeds = flatten_embeds(self.image_embeds_list)
+        # video_embeds = flatten_embeds(self.video_embeds_list)
             
-        return image_embeds, video_embeds
+        return {"image_embed": self.image_embeds_list, "video_embed": self.video_embeds_list}
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: dict):
@@ -228,6 +228,7 @@ class DataParallelPPOEncoder(BasePPOEncoder):
                     current_video_embed = self.video_embeds_list[global_index]
                     image_grad = micro_batch.get("image_embed_grad_list", None)
                     video_grad = micro_batch.get("video_embed_grad_list", None)
+                    breakpoint()
                     if current_image_embed is not None and image_grad is not None:
                         assert current_image_embed.shape == image_grad.shape
                         current_image_embed.backward(gradient=image_grad, retain_graph=True)

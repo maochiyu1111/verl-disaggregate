@@ -72,7 +72,7 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing
-from verl.utils.py_functional import convert_to_regular_types
+from verl.utils.py_functional import convert_to_regular_types, dict_to
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
@@ -918,13 +918,22 @@ class ActorRolloutRefWorker_encoder(Worker):
     or a hybrid engine based on the config.rollout
     """
 
-    def __init__(self, config: DictConfig, role: str):
-        super().__init__()
+    def __init__(self, config: DictConfig, role: str, **kwargs):
+        Worker.__init__(self)
+
         self.config = config
+        self.profile_option = kwargs.get("profile_option", None)
         import torch.distributed
 
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group()
+            rank = int(os.environ.get("RANK", 0))
+            world_size = int(os.environ.get("WORLD_SIZE", 1))
+            torch.distributed.init_process_group(
+                backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}",
+                rank=rank,
+                world_size=world_size,
+                init_method=os.environ.get("DIST_INIT_METHOD", None),
+            )
 
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
@@ -936,10 +945,11 @@ class ActorRolloutRefWorker_encoder(Worker):
         self.ulysses_sequence_parallel_size = self.config.actor.get("ulysses_sequence_parallel_size", 1)
         dp = world_size // self.ulysses_sequence_parallel_size
         if self.ulysses_sequence_parallel_size > 1:
-            self.ulysses_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"])
+            self.ulysses_device_mesh = init_device_mesh(
+                device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
+            )
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
-
         self.role = role
         assert self.role in ["encoder_ref", "encoder_actor_rollout"]
 
@@ -947,6 +957,11 @@ class ActorRolloutRefWorker_encoder(Worker):
         self._is_rollout = self.role == "encoder_actor_rollout"
         self._is_ref = self.role == "encoder_ref"
 
+        profiler_config = omega_conf_to_dataclass(config.get("profiler"))
+        DistProfilerExtension.__init__(
+            self, DistProfiler(rank=self.rank, config=profiler_config, option=self.profile_option)
+        )
+        
         self._is_offload_param = False
         self._is_offload_optimizer = False
         # 目前来看，可以保持原有设置，即在offload设置上，encoder保持原actor与ref的设置，不自行新增设置
@@ -963,29 +978,42 @@ class ActorRolloutRefWorker_encoder(Worker):
         if self._is_actor:
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
             self.config.actor.ppo_mini_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-            assert self.config.actor.ppo_mini_batch_size > 0, f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after normalization"
+            assert self.config.actor.ppo_mini_batch_size > 0, (
+                f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after "
+                f"normalization"
+            )
             # micro bsz
             if self.config.actor.ppo_micro_batch_size is not None:
-                self.config.actor.ppo_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+                self.config.actor.ppo_micro_batch_size //= (
+                    self.device_mesh.size() // self.ulysses_sequence_parallel_size
+                )
                 self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
 
             if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
-                assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
-                assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, (
+                    f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by "
+                    f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                )
+                assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, (
+                    f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than "
+                    f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                )
 
         # normalize rollout config
         if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
-            self.config.rollout.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+            self.config.rollout.log_prob_micro_batch_size //= (
+                self.device_mesh.size() // self.ulysses_sequence_parallel_size
+            )
             self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
         # normalize ref config
         if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-            self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
+            self.conf
 
     def _build_model_optimizer(
         self,
         model_path,
-        fsdp_config,
+        fsdp_config: FSDPEngineConfig,
         optim_config,
         override_model_config,
         use_remove_padding=False,
@@ -1182,7 +1210,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
         rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
-        rollout_name = self.config.rollout.name
+        rollout_name = self.config.rollout.encoder.name
         if rollout_name == "hf":
             from verl.workers.rollout import HFRollout
             from verl.workers.sharding_manager.base import BaseShardingManager
@@ -1192,44 +1220,35 @@ class ActorRolloutRefWorker_encoder(Worker):
             # TODO: a sharding manager that do nothing?
 
         elif rollout_name == "vllm":
-            from verl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
+            from verl.workers.rollout.vllm_rollout import vLLMRollout
             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.encoder.path)
-            if vllm_mode == "customized":
-                rollout = vLLMRollout(
-                    actor_module=self.actor_module_fsdp,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                    trust_remote_code=trust_remote_code,
-                )
-            elif vllm_mode == "spmd":
-                from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+            local_path = copy_to_local(self.config.model.encoder.path, use_shm=self.config.model.get("use_shm", False))
+            from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
 
-                vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
-                rollout = vllm_rollout_cls(
-                    model_path=local_path,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                    device_mesh=rollout_device_mesh,
-                    trust_remote_code=trust_remote_code,
-                )
-            else:
-                raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
+            vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
+            rollout = vllm_rollout_cls(
+                model_path=local_path,
+                config=self.config.rollout,
+                tokenizer=self.tokenizer,
+                model_hf_config=self.actor_model_config,
+                device_mesh=rollout_device_mesh,
+                trust_remote_code=trust_remote_code,
+            )
 
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
-            if torch.distributed.get_world_size() == 1:
-                self.config.rollout.load_format = "dummy_hf"
+            full_params = torch.distributed.get_world_size() == 1
             rollout_sharding_manager = FSDPVLLMShardingManager(
                 module=self.actor_module_fsdp,
                 inference_engine=rollout.inference_engine,
                 model_config=self.actor_model_config,
-                full_params="hf" in self.config.rollout.load_format,
+                rollout_config=self.config.rollout,
+                full_params=full_params,
                 device_mesh=rollout_device_mesh,
                 offload_param=self._is_offload_param,
+                load_format=self.config.rollout.load_format,
+                layered_summon=self.config.rollout.get("layered_summon", False),
             )
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
@@ -1351,7 +1370,8 @@ class ActorRolloutRefWorker_encoder(Worker):
             self.actor = DataParallelPPOEncoder(config=self.config.actor, encoder_module=self.actor_module_fsdp, encoder_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
-            self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            # self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            pass
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
@@ -1373,10 +1393,10 @@ class ActorRolloutRefWorker_encoder(Worker):
             self.flops_counter = FlopsCounter(self.actor_model_config)
             self.checkpoint_manager = FSDPCheckpointManager(
                 model=self.actor_module_fsdp,
-                optimizer=self.actor.actor_optimizer,
+                optimizer=self.actor.encoder_optimizer,
                 lr_scheduler=self.actor_lr_scheduler,
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
-                checkpoint_contents=self.config.actor.checkpoint.contents,
+                checkpoint_config=self.config.actor.checkpoint,
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -1423,6 +1443,26 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         # return output
 
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def actor_forward(self, data: DataProto):
+        assert self._is_actor
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)  
+        data = data.to(torch.cuda.current_device())     
+        encoder_embed = self.actor.extract_feature_train(data=data)    
+        output = dict_to(encoder_embed, "cpu")
+        
+        if self.world_size > 1 and fsdp_version(self.actor.encoder_module) == 1:
+            self.actor.encoder_module._handle.reshard(True)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
+
+        return output
+
+    
+    
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob_encoder(self, data: DataProto):
         assert self._is_actor
@@ -1814,44 +1854,35 @@ class ActorRolloutRefWorker_llm(Worker):
             # TODO: a sharding manager that do nothing?
 
         elif rollout_name == "vllm":
-            from verl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
+            from verl.workers.rollout.vllm_rollout import vLLMRollout
             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.llm.path)
-            if vllm_mode == "customized":
-                rollout = vLLMRollout(
-                    actor_module=self.actor_module_fsdp,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                    trust_remote_code=trust_remote_code,
-                )
-            elif vllm_mode == "spmd":
-                from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+            local_path = copy_to_local(self.config.model.llm.path, use_shm=self.config.model.get("use_shm", False))
+            from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
 
-                vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
-                rollout = vllm_rollout_cls(
-                    model_path=local_path,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                    device_mesh=rollout_device_mesh,
-                    trust_remote_code=trust_remote_code,
-                )
-            else:
-                raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
+            vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
+            rollout = vllm_rollout_cls(
+                model_path=local_path,
+                config=self.config.rollout,
+                tokenizer=self.tokenizer,
+                model_hf_config=self.actor_model_config,
+                device_mesh=rollout_device_mesh,
+                trust_remote_code=trust_remote_code,
+            )
 
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
-            if torch.distributed.get_world_size() == 1:
-                self.config.rollout.load_format = "dummy_hf"
+            full_params = torch.distributed.get_world_size() == 1
             rollout_sharding_manager = FSDPVLLMShardingManager(
                 module=self.actor_module_fsdp,
                 inference_engine=rollout.inference_engine,
                 model_config=self.actor_model_config,
-                full_params="hf" in self.config.rollout.load_format,
+                rollout_config=self.config.rollout,
+                full_params=full_params,
                 device_mesh=rollout_device_mesh,
                 offload_param=self._is_offload_param,
+                load_format=self.config.rollout.load_format,
+                layered_summon=self.config.rollout.get("layered_summon", False),
             )
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
@@ -1972,7 +2003,8 @@ class ActorRolloutRefWorker_llm(Worker):
             self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
-            self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            # self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            pass
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
@@ -1997,13 +2029,14 @@ class ActorRolloutRefWorker_llm(Worker):
                 optimizer=self.actor.actor_optimizer,
                 lr_scheduler=self.actor_lr_scheduler,
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
-                checkpoint_contents=self.config.actor.checkpoint.contents,
+                checkpoint_config=self.config.actor.checkpoint,
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def update_actor(self, data: DataProto):
+    def update_actor(self, data: DataProto, encoder_embed: dict):
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
+        encoder_embed = encoder_embed.to(torch.cuda.current_device())
 
         assert self._is_actor
         if self._is_offload_param:
@@ -2015,7 +2048,7 @@ class ActorRolloutRefWorker_llm(Worker):
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
             # perform training
             with Timer(name="update_policy", logger=None) as timer:
-                metrics, encoder_gradients = self.actor.update_policy_llm(data=data)
+                metrics, encoder_gradients = self.actor.update_policy_llm(data=data, encoder_embed=encoder_embed)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)

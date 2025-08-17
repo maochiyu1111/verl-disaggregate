@@ -30,7 +30,7 @@ from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_name, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
-from verl.utils.py_functional import append_to_dict
+from verl.utils.py_functional import append_to_dict, dict_split
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
@@ -112,8 +112,8 @@ class DataParallelPPOActor(BasePPOActor):
             batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
-            image_embed = torch.cat(micro_batch["image_embed"].tolist(), dim=0) if "image_embed" in micro_batch else None
-            video_embed = torch.cat(micro_batch["video_embed"].tolist(), dim=0) if "video_embed" in micro_batch else None 
+            image_embed = micro_batch["image_embed"] if "image_embed" in micro_batch else None
+            video_embed = micro_batch["video_embed"] if "video_embed" in micro_batch else None 
             if encoder_grad:
                 self.current_image_embed = image_embed
                 self.current_video_embed = video_embed
@@ -574,7 +574,7 @@ class DataParallelPPOActor(BasePPOActor):
 
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
-    def update_policy_llm(self, data: DataProto):
+    def update_policy_llm(self, data: DataProto, encoder_embed: dict):
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -594,16 +594,13 @@ class DataParallelPPOActor(BasePPOActor):
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
-        if "image_embed" in data.non_tensor_batch.keys():
-            non_tensor_select_keys.append("image_embed")
-        if "video_embed" in data.non_tensor_batch.keys():
-            non_tensor_select_keys.append("video_embed")
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
+        mini_batches_encoder_embed = dict_split(encoder_embed, self.config.ppo_mini_batch_size) 
 
         metrics = {}
         image_embed_grad_list = []
@@ -618,12 +615,14 @@ class DataParallelPPOActor(BasePPOActor):
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                     )
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+                    micro_batches_encoder_embed = dict_split(mini_batches_encoder_embed, self.config.ppo_micro_batch_size_per_gpu)
 
                 self.actor_optimizer.zero_grad()
 
-                for micro_batch in micro_batches:
+                for micro_batch, encoder_embed in zip(micro_batches, micro_batches_encoder_embed):
                     micro_batch_metrics = {}
-                    model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+                    breakpoint()
+                    model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch, **encoder_embed}
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
