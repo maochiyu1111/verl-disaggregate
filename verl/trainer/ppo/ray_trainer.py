@@ -1332,6 +1332,7 @@ class RayPPOTrainer:
                     from numpy.dtypes import ObjectDType
                     torch.serialization.add_safe_globals([DataProto, _reconstruct, ndarray, numpy.dtype, ObjectDType])
                     batch = torch.load("update_batch.pt", map_location="cpu")
+                    batch = batch.split(96)[0]
                     # breakpoint()
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
@@ -1340,8 +1341,9 @@ class RayPPOTrainer:
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             # actor_output = self.actor_rollout_wg.update_actor(batch)
                             encoder_embed = self.actor_rollout_encoder_wg.actor_forward(batch)
-                            actor_output, encoder_gradients = self.actor_rollout_llm_wg.update_actor(batch, encoder_embed)
-                            self.actor_rollout_encoder_wg.update_actor(encoder_gradients)
+                            # batch = batch.union_non_tensor(encoder_embed)
+                            actor_output = self.actor_rollout_llm_wg.update_actor(batch, encoder_embed)
+                            self.actor_rollout_encoder_wg.update_actor(actor_output)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

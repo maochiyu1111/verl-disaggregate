@@ -112,9 +112,13 @@ class DataParallelPPOActor(BasePPOActor):
             batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
-            image_embed = micro_batch["image_embed"] if "image_embed" in micro_batch else None
-            video_embed = micro_batch["video_embed"] if "video_embed" in micro_batch else None 
+            image_embed = micro_batch["image_embed"][0] if "image_embed" in micro_batch else None
+            video_embed = micro_batch["video_embed"][0] if "video_embed" in micro_batch else None 
             if encoder_grad:
+                if image_embed is not None:
+                    image_embed.requires_grad_(True)
+                if video_embed is not None:
+                    video_embed.requires_grad_(True)
                 self.current_image_embed = image_embed
                 self.current_video_embed = video_embed
             entropy = None
@@ -574,7 +578,7 @@ class DataParallelPPOActor(BasePPOActor):
 
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
-    def update_policy_llm(self, data: DataProto, encoder_embed: dict):
+    def update_policy_llm(self, data: DataProto, encoder_embed: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -600,13 +604,13 @@ class DataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
-        mini_batches_encoder_embed = dict_split(encoder_embed, self.config.ppo_mini_batch_size) 
+        mini_batches_embed = encoder_embed.split(self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu)
 
         metrics = {}
         image_embed_grad_list = []
         video_embed_grad_list = []
         for _ in range(self.config.ppo_epochs):
-            for batch_idx, mini_batch in enumerate(mini_batches):
+            for mini_batch, mini_batch_embed in zip(mini_batches, mini_batches_embed):
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
@@ -615,14 +619,13 @@ class DataParallelPPOActor(BasePPOActor):
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                     )
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
-                    micro_batches_encoder_embed = dict_split(mini_batches_encoder_embed, self.config.ppo_micro_batch_size_per_gpu)
+                    micro_batches_embed = mini_batch_embed.split(1)
 
                 self.actor_optimizer.zero_grad()
 
-                for micro_batch, encoder_embed in zip(micro_batches, micro_batches_encoder_embed):
+                for micro_batch, micro_batch_embed in zip(micro_batches, micro_batches_embed):
                     micro_batch_metrics = {}
-                    breakpoint()
-                    model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch, **encoder_embed}
+                    model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch, **micro_batch_embed.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
@@ -634,9 +637,10 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(
-                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, disaggregate=True, encoder_grad=True
-                    )
+                    with torch.enable_grad():
+                        entropy, log_prob = self._forward_micro_batch(
+                            model_inputs, temperature=temperature, calculate_entropy=calculate_entropy, disaggregate=True, encoder_grad=True
+                        )
 
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
@@ -679,10 +683,10 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
 
-                    if hasattr(self, 'current_image_embed'):
+                    if hasattr(self, 'current_image_embed') and self.current_image_embed is not None:
                         image_embed_grad = self.current_image_embed.grad
                         image_embed_grad_list.append(image_embed_grad)
-                    if hasattr(self, 'current_video_embed'):
+                    if hasattr(self, 'current_video_embed') and self.current_video_embed is not None: 
                         video_embed_grad = self.current_video_embed.grad
                         video_embed_grad_list.append(video_embed_grad)
                     
@@ -696,16 +700,24 @@ class DataParallelPPOActor(BasePPOActor):
                     )
                     append_to_dict(metrics, micro_batch_metrics)
 
-                grad_norm = self._optimizer_step()
-                mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
-                append_to_dict(metrics, mini_batch_metrics)
-    
-        if image_embed_grad_list[0] is not None and video_embed_grad_list[0] is not None:
-            encoder_gradients = {"image_embed_grad_list": image_embed_grad_list, "video_embed_grad_list": video_embed_grad_list}
-        elif image_embed_grad_list[0]  is not None and video_embed_grad_list[0] is None:
-            encoder_gradients = {"image_embed_grad_list": image_embed_grad_list}
-        elif image_embed_grad_list[0] is None and video_embed_grad_list[0] is not None:
-            encoder_gradients = {"video_embed_grad_list": video_embed_grad_list}
+                # grad_norm = self._optimizer_step()
+                # mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                # append_to_dict(metrics, mini_batch_metrics)
+                
+        def flatten_embeds(embeds_list: list):
+            if not embeds_list :
+                return []
+            return [tensor.cpu().to(dtype=torch.float32) for tensor in embeds_list]
+        
+        image_embed_grad_list = flatten_embeds(image_embed_grad_list)
+        video_embed_grad_list = flatten_embeds(video_embed_grad_list)
+        
+        if image_embed_grad_list and video_embed_grad_list:
+            encoder_gradients = {"image_embed_grad": image_embed_grad_list, "video_embed_grad": video_embed_grad_list}
+        elif image_embed_grad_list and not video_embed_grad_list:
+            encoder_gradients = {"image_embed_grad": image_embed_grad_list}
+        elif not image_embed_grad_list and video_embed_grad_list:
+            encoder_gradients = {"video_embed_grad": video_embed_grad_list}
         else:
             raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
         self.actor_optimizer.zero_grad()

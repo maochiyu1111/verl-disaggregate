@@ -1400,8 +1400,9 @@ class ActorRolloutRefWorker_encoder(Worker):
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def update_actor(self, data: dict):
+    def update_actor(self, data: DataProto):
         # Support all hardwares
+        data = DataProto(non_tensor_batch=data.non_tensor_batch)
         data = data.to(torch.cuda.current_device())
 
         assert self._is_actor
@@ -1449,8 +1450,17 @@ class ActorRolloutRefWorker_encoder(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)  
         data = data.to(torch.cuda.current_device())     
-        encoder_embed = self.actor.extract_feature_train(data=data)    
-        output = dict_to(encoder_embed, "cpu")
+        image_embed, video_embed = self.actor.extract_feature_train(data=data)    
+        if image_embed is not None and video_embed is not None:
+                embeds = {"image_embed": image_embed, "video_embed": video_embed}
+        elif image_embed is not None and video_embed is None:
+            embeds = {"image_embed": image_embed}
+        elif image_embed is None and video_embed is not None:
+            embeds = {"video_embed": video_embed}
+        else:
+            raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
+        output = DataProto.from_dict(non_tensors=embeds)
+        output = output.to("cpu")
         
         if self.world_size > 1 and fsdp_version(self.actor.encoder_module) == 1:
             self.actor.encoder_module._handle.reshard(True)
@@ -1706,6 +1716,11 @@ class ActorRolloutRefWorker_llm(Worker):
             )
             # 遇到报错，actor_module在meta，fsdp在cuda:0
             actor_module = actor_module.to_empty(device=torch.device("cuda", torch.cuda.current_device()), recurse=True)
+            lm_head_sd = torch.load("/workspace/models/qwen2.5vl-lm_head.pt")
+            llm_sd = torch.load("/workspace/models/qwen2.5vl-3b-llm.pt")
+            actor_module.lm_head.load_state_dict(lm_head_sd)
+            actor_module.language_model.load_state_dict(llm_sd)
+            # breakpoint()
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -2033,7 +2048,7 @@ class ActorRolloutRefWorker_llm(Worker):
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def update_actor(self, data: DataProto, encoder_embed: dict):
+    def update_actor(self, data: DataProto, encoder_embed: DataProto):
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
         encoder_embed = encoder_embed.to(torch.cuda.current_device())
@@ -2062,11 +2077,10 @@ class ActorRolloutRefWorker_llm(Worker):
             metrics["actor/lr"] = lr
 
             # TODO: here, we should return all metrics
-            output = DataProto(meta_info={"metrics": metrics})
-
+            # output = DataProto(meta_info={"metrics": metrics})
+            output = DataProto.from_dict(meta_info={"metrics": metrics}, non_tensors=encoder_gradients)
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
             output = output.to("cpu")
-            encoder_gradients = encoder_gradients.to("cpu")
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -2075,7 +2089,7 @@ class ActorRolloutRefWorker_llm(Worker):
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
-        return output, encoder_gradients
+        return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
