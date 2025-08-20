@@ -215,6 +215,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
             # update model params
             self.update_params(params, peft_config=peft_config)
+
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
             del params
             if self.offload_param:
@@ -326,11 +327,12 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                         ):
                             return f"{module_k}.base_layer.bias"
                     return k
-
                 updated_params = {replace_lora_wrapper(k): v for k, v in updated_params.items()}
-
+        if 'Qwen2_5OmniThinker' in model.__class__.__name__:
+            updated_params = {f"thinker.{k}": v for k, v in updated_params.items()}
         from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-
+        #for test
+        #print("update_params keys:", list(updated_params.keys()))
         patch_vllm_moe_model_weight_loader(model)
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
         loaded_params = model.load_weights(

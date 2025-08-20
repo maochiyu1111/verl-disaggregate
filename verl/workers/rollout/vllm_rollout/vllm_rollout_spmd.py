@@ -162,7 +162,8 @@ class vLLMRollout(BaseRollout):
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
-
+        if "omni" in model_path.lower():
+            engine_kwargs["limit_mm_per_prompt"] = {"audio": 1, "image": 1}
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=config.free_cache_engine,
@@ -270,7 +271,17 @@ class vLLMRollout(BaseRollout):
             for raw_prompt_ids, multi_modal_data in zip(
                 non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data"), strict=True
             ):
-                vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
+                if "audio" in multi_modal_data:
+                    vllm_inputs.append(
+                        {
+                            "prompt_token_ids": list(raw_prompt_ids),
+                            "multi_modal_data": multi_modal_data,
+                            "mm_processor_kwargs": {"use_audio_in_video": False,},
+                        }
+                    )
+                else:
+                    vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
+
         else:
             vllm_inputs = [
                 {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
@@ -314,10 +325,12 @@ class vLLMRollout(BaseRollout):
                     LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path")
                 ] * batch_size
 
+
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
             outputs = self.inference_engine.generate(
                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
+
                 sampling_params=self.sampling_params,
                 lora_request=lora_requests,
                 use_tqdm=False,
