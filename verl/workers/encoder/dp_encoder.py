@@ -164,7 +164,6 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         non_tensor_select_keys = ["multi_modal_inputs"]
         data = data.select(non_tensor_batch_keys=non_tensor_select_keys)
         mini_batches = data.split(self.config.ppo_mini_batch_size)     
-
         self.image_embeds_list = []
         self.video_embeds_list = []
         for batch_idx, mini_batch in enumerate(mini_batches):
@@ -191,46 +190,41 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         return image_embeds, video_embeds
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
-    def update_policy(self, data: DataProto):
+    def update_policy(self, data: DataProto, encoder_input: DataProto):
         # make sure we are in training mode
         # 想方法拿到每个microbatch的gradient
         self.encoder_module.train()
-        
-        mini_batches = data.split(self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu)    
+        # mini_batches only have gradients
+        mini_batches = data.split(self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu)   
+        mini_batches_input =  encoder_input.split(self.config.ppo_mini_batch_size)
         # metrics = {}
         for _ in range(self.config.ppo_epochs):
-            global_index = 0
-            for mini_batch in mini_batches:
+            # global_index = 0
+            for mini_batch, mini_batch_input in zip(mini_batches, mini_batches_input):
                 
                 self.gradient_accumulation = (
                     self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                 )
                 micro_batches = mini_batch.split(1)
+                micro_batches_input = mini_batch_input.split(self.config.ppo_micro_batch_size_per_gpu)
                 self.encoder_optimizer.zero_grad()
 
-                breakpoint()
                 success_count = 0
-                for micro_batch in micro_batches:
-                    current_image_embed = self.image_embeds_list[global_index]
-                    current_video_embed = self.video_embeds_list[global_index]
+                for micro_batch, micro_batch_input in zip(micro_batches, micro_batches_input):
+                    # current_image_embed = self.image_embeds_list[global_index]
+                    # current_video_embed = self.video_embeds_list[global_index]
+                    with torch.enable_grad():
+                        current_image_embed, current_video_embed = self._forward_micro_batch({**micro_batch_input.non_tensor_batch})
                     image_grad = micro_batch.non_tensor_batch["image_embed_grad"][0].to(dtype=torch.bfloat16, device=torch.cuda.current_device()) if "image_embed_grad" in micro_batch.non_tensor_batch.keys() else None
                     video_grad = micro_batch.non_tensor_batch["video_embed_grad"][0].to(dtype=torch.bfloat16, device=torch.cuda.current_device()) if "video_embed_grad" in micro_batch.non_tensor_batch.keys() else None
                     if current_image_embed is not None and image_grad is not None:
-                        if global_index == 1:
-                            global_index += 1
-                            continue
-                        try:
-                            assert current_image_embed.shape == image_grad.shape
-                            current_image_embed.backward(gradient=image_grad, retain_graph=True)
-                            success_count += 1
-                        except Exception:
-                            pass
+                        assert current_image_embed.shape == image_grad.shape
+                        current_image_embed.backward(gradient=image_grad, retain_graph=True)
+
                     if current_video_embed is not None and video_grad is not None:
                         assert current_video_embed.shape == video_grad.shape
                         current_video_embed.backward(gradient=video_grad)
-                    global_index += 1
-                    print("global:",global_index)
-                    print("success:", success_count)
+
                 breakpoint()
                 grad_norm = self._optimizer_step()
                 # 先不传入这部分的gradient

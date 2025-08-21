@@ -1400,10 +1400,11 @@ class ActorRolloutRefWorker_encoder(Worker):
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def update_actor(self, data: DataProto):
+    def update_actor(self, data: DataProto, encoder_input: DataProto):
         # Support all hardwares
         data = DataProto(non_tensor_batch=data.non_tensor_batch)
         data = data.to(torch.cuda.current_device())
+        encoder_input = encoder_input.to(torch.cuda.current_device())
 
         assert self._is_actor
         if self._is_offload_param:
@@ -1416,7 +1417,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             # perform training
             # with Timer(name="update_policy", logger=None) as timer:
             # metrics = self.actor.update_policy(data=data)
-        self.actor.update_policy(data=data)
+        self.actor.update_policy(data=data, encoder_input=encoder_input)
             # delta_time = timer.last
             # global_num_tokens = data.meta_info["global_token_num"]
             # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
