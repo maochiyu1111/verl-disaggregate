@@ -79,11 +79,11 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
             # from verl.models.transformers.qwen2_5_vl import encoder_forward
             # image_embed, video_embed = encoder_forward
-            image_embed, video_embed = self.encoder_module.encoder_forward(
+            image_embed, video_embed, image_split_sizes, video_split_sizes = self.encoder_module(
                 **multi_modal_inputs,
             )  # prevent model thinks we are generating
 
-        return  image_embed , video_embed
+        return  image_embed , video_embed, image_split_sizes, video_split_sizes
     
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -153,8 +153,7 @@ class DataParallelPPOEncoder(BasePPOEncoder):
     def extract_feature_train(self, data: DataProto) -> torch.Tensor:
         """extract features given a batch of data
         """
-        # set to train
-        self.encoder_module.train()
+        self.encoder_module.eval()
 
         # qzy note：目前先保持与actor相同的mbs，后期应做到分离，encoder部分不使用use_dynamic_bsz
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -164,8 +163,10 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         non_tensor_select_keys = ["multi_modal_inputs"]
         data = data.select(non_tensor_batch_keys=non_tensor_select_keys)
         mini_batches = data.split(self.config.ppo_mini_batch_size)     
-        self.image_embeds_list = []
-        self.video_embeds_list = []
+        image_embeds_list = []
+        video_embeds_list = []
+        image_split_sizes_list = []
+        video_split_sizes_list = []
         for batch_idx, mini_batch in enumerate(mini_batches):
             self.gradient_accumulation = (
                 self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
@@ -173,21 +174,22 @@ class DataParallelPPOEncoder(BasePPOEncoder):
             micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
             for micro_batch in micro_batches:
                 model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
-                with torch.enable_grad():
-                    image_embeds, video_embeds = self._forward_micro_batch(model_inputs)
-                self.image_embeds_list.append(image_embeds)
-                self.video_embeds_list.append(video_embeds)
+                with torch.no_grad():
+                    image_embeds, video_embeds, image_split_sizes, video_split_sizes = self._forward_micro_batch(model_inputs)
+                image_embeds_list.append(torch.split(image_embeds, image_split_sizes) if image_embeds is not None else None)
+                video_embeds_list.append(torch.split(video_embeds, video_split_sizes) if video_embeds is not None else None)
+                image_split_sizes_list.append(image_split_sizes)
+                video_split_sizes_list.append(video_split_sizes)
 
-        def flatten_embeds(embeds_list: list):
+        def flatten_embeds_and_list(embeds_list: list, split_sizes_list: list):
             # 可能其中一个是None列表
             if not embeds_list or embeds_list[0] is None:
-                return None
-            return [tensor.detach().cpu().to(dtype=torch.float32) for tensor in embeds_list]
-        
+                return None, None
+            return [tensor.cpu().to(dtype=torch.float32) for tensor_tuple in embeds_list for tensor in tensor_tuple], [item for sublist in split_sizes_list for item in sublist]
             
-        image_embeds = flatten_embeds(self.image_embeds_list)
-        video_embeds = flatten_embeds(self.video_embeds_list)
-        return image_embeds, video_embeds
+        image_embeds, image_sizes = flatten_embeds_and_list(image_embeds_list, image_split_sizes_list)
+        video_embeds, video_sizes = flatten_embeds_and_list(video_embeds_list, video_split_sizes_list)
+        return image_embeds, video_embeds, image_sizes, video_sizes
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto, encoder_input: DataProto):
@@ -195,7 +197,7 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         # 想方法拿到每个microbatch的gradient
         self.encoder_module.train()
         # mini_batches only have gradients
-        mini_batches = data.split(self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu)   
+        mini_batches = data.split(self.config.ppo_mini_batch_size)   
         mini_batches_input =  encoder_input.split(self.config.ppo_mini_batch_size)
         # metrics = {}
         for _ in range(self.config.ppo_epochs):
@@ -205,18 +207,17 @@ class DataParallelPPOEncoder(BasePPOEncoder):
                 self.gradient_accumulation = (
                     self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                 )
-                micro_batches = mini_batch.split(1)
+                micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
                 micro_batches_input = mini_batch_input.split(self.config.ppo_micro_batch_size_per_gpu)
                 self.encoder_optimizer.zero_grad()
 
-                success_count = 0
                 for micro_batch, micro_batch_input in zip(micro_batches, micro_batches_input):
                     # current_image_embed = self.image_embeds_list[global_index]
                     # current_video_embed = self.video_embeds_list[global_index]
                     with torch.enable_grad():
-                        current_image_embed, current_video_embed = self._forward_micro_batch({**micro_batch_input.non_tensor_batch})
-                    image_grad = micro_batch.non_tensor_batch["image_embed_grad"][0].to(dtype=torch.bfloat16, device=torch.cuda.current_device()) if "image_embed_grad" in micro_batch.non_tensor_batch.keys() else None
-                    video_grad = micro_batch.non_tensor_batch["video_embed_grad"][0].to(dtype=torch.bfloat16, device=torch.cuda.current_device()) if "video_embed_grad" in micro_batch.non_tensor_batch.keys() else None
+                        current_image_embed, current_video_embed, *_ = self._forward_micro_batch({**micro_batch_input.non_tensor_batch})
+                    image_grad = torch.cat(micro_batch.non_tensor_batch["image_embed_grad"].tolist(), dim=0).to(dtype=torch.bfloat16, device=torch.cuda.current_device()) if "image_embed_grad" in micro_batch.non_tensor_batch.keys() else None
+                    video_grad = torch.cat(micro_batch.non_tensor_batch["video_embed_grad"].tolist(), dim=0).to(dtype=torch.bfloat16, device=torch.cuda.current_device()) if "video_embed_grad" in micro_batch.non_tensor_batch.keys() else None
                     if current_image_embed is not None and image_grad is not None:
                         assert current_image_embed.shape == image_grad.shape
                         current_image_embed.backward(gradient=image_grad, retain_graph=True)
@@ -225,12 +226,10 @@ class DataParallelPPOEncoder(BasePPOEncoder):
                         assert current_video_embed.shape == video_grad.shape
                         current_video_embed.backward(gradient=video_grad)
 
-                breakpoint()
                 grad_norm = self._optimizer_step()
                 # 先不传入这部分的gradient
                 # mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 # append_to_dict(metrics, mini_batch_metrics)
-        self.image_embeds_list.clear()
-        self.video_embeds_list.clear()
+
         self.encoder_optimizer.zero_grad()
         # return metrics

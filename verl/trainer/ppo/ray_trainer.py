@@ -1341,9 +1341,10 @@ class RayPPOTrainer:
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             # actor_output = self.actor_rollout_wg.update_actor(batch)
                             encoder_embed = self.actor_rollout_encoder_wg.actor_forward(batch)
-                            # batch = batch.union_non_tensor(encoder_embed)
-                            actor_output = self.actor_rollout_llm_wg.update_actor(batch, encoder_embed)
+                            batch = batch.union_non_tensor(encoder_embed)
+                            actor_output = self.actor_rollout_llm_wg.update_actor(batch)
                             encoder_input = batch.pop(non_tensor_batch_keys=["multi_modal_inputs"])
+                            # expecting None to be DataProto, but got <class 'NoneType'>
                             self.actor_rollout_encoder_wg.update_actor(actor_output, encoder_input)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

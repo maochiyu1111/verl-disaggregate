@@ -343,9 +343,10 @@ def is_transformers_version_in_range(min_version: Optional[str] = None, max_vers
 
 
 def apply_monkey_patch_encoder():
-    from verl.models.transformers.qwen2_5_vl import encoder_forward
-    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
-    Qwen2_5_VisionTransformerPretrainedModel.encoder_forward = encoder_forward
+    # from verl.models.transformers.qwen2_5_vl import encoder_forward
+    # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+    # Qwen2_5_VisionTransformerPretrainedModel.encoder_forward = encoder_forward
+    pass
     
 def apply_monkey_patch_llm():
     # from verl.models.transformers.qwen2_5_vl import llm_forward

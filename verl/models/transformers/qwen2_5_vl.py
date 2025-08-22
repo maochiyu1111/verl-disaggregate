@@ -25,6 +25,7 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VLTextModel,
     Qwen2_5_VLModel,
     Qwen2_5_VLPreTrainedModel,
+    Qwen2_5_VisionTransformerPretrainedModel,
 )
 
 from transformers.utils import is_torchdynamo_compiling
@@ -524,30 +525,38 @@ class CustomQwen2_5_VLModel(Qwen2_5_VLModel):
 
 # forward for encoder
 
-
-def encoder_forward(
-    self,
-    pixel_values: Optional[torch.Tensor] = None,
-    pixel_values_videos: Optional[torch.FloatTensor] = None,
-    image_grid_thw: Optional[torch.LongTensor] = None,
-    video_grid_thw: Optional[torch.LongTensor] = None,
-    **kwargs,
-):
-    image_embeds = None
-    video_embeds = None
-    
-    if pixel_values is not None:
-        pixel_values = pixel_values.type(self.dtype)
-        image_embeds = self(pixel_values, grid_thw=image_grid_thw)
-        split_sizes = (image_grid_thw.prod(-1) // self.spatial_merge_size**2).tolist()
-        image_embeds = torch.split(image_embeds, split_sizes)
-        image_embeds = torch.cat(image_embeds, dim=0)
+class CustomQwen2_5_VLEncoder(Qwen2_5_VLPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.model = Qwen2_5_VisionTransformerPretrainedModel._from_config(config)
+        # Initialize weights and apply final processing
+        self.post_init()
         
-    if pixel_values_videos is not None:
-        pixel_values_videos = pixel_values_videos.type(self.dtype)
-        video_embeds = self(pixel_values_videos, grid_thw=video_grid_thw)
-        split_sizes = (video_grid_thw.prod(-1) // self.spatial_merge_size**2).tolist()
-        video_embeds = torch.split(video_embeds, split_sizes)
-        video_embeds = torch.cat(video_embeds, dim=0)
+    def forward(
+        self,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ):
+        image_embeds = None
+        video_embeds = None
+        image_split_sizes = None
+        video_split_sizes = None
         
-    return image_embeds, video_embeds
+        if pixel_values is not None:
+            pixel_values = pixel_values.type(self.model.dtype)
+            image_embeds = self.model(pixel_values, grid_thw=image_grid_thw)
+            image_split_sizes = (image_grid_thw.prod(-1) // self.model.spatial_merge_size**2).tolist()
+            image_embeds = torch.split(image_embeds, image_split_sizes)
+            image_embeds = torch.cat(image_embeds, dim=0)
+            
+        if pixel_values_videos is not None:
+            pixel_values_videos = pixel_values_videos.type(self.model.dtype)
+            video_embeds = self.model(pixel_values_videos, grid_thw=video_grid_thw)
+            video_split_sizes = (video_grid_thw.prod(-1) // self.model.spatial_merge_size**2).tolist()
+            video_embeds = torch.split(video_embeds, video_split_sizes)
+            video_embeds = torch.cat(video_embeds, dim=0)
+            
+        return image_embeds, video_embeds, image_split_sizes, video_split_sizes

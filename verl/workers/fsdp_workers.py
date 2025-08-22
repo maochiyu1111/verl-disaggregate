@@ -1062,8 +1062,10 @@ class ActorRolloutRefWorker_encoder(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
-            actor_module_class = Qwen2_5_VisionTransformerPretrainedModel
+            # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+            # actor_module_class = Qwen2_5_VisionTransformerPretrainedModel
+            from verl.models.transformers.qwen2_5_vl import CustomQwen2_5_VLEncoder
+            actor_module_class = CustomQwen2_5_VLEncoder
 
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
@@ -1084,8 +1086,8 @@ class ActorRolloutRefWorker_encoder(Worker):
 
                 _apply_liger_kernel_to_instance(model=actor_module)
             
-            from verl.models.transformers.monkey_patch import apply_monkey_patch_encoder
-            apply_monkey_patch_encoder()
+            # from verl.models.transformers.monkey_patch import apply_monkey_patch_encoder
+            # apply_monkey_patch_encoder()
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
@@ -1112,7 +1114,9 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
+        wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLVisionBlock"],}
+        # auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
+        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)
 
         if self._is_rollout and self.config.rollout.name == "hf":
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
@@ -1451,13 +1455,13 @@ class ActorRolloutRefWorker_encoder(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)  
         data = data.to(torch.cuda.current_device())     
-        image_embed, video_embed = self.actor.extract_feature_train(data=data)    
+        image_embed, video_embed, image_sizes, video_sizes = self.actor.extract_feature_train(data=data)    
         if image_embed is not None and video_embed is not None:
-                embeds = {"image_embed": image_embed, "video_embed": video_embed}
+                embeds = {"image_embed": image_embed, "video_embed": video_embed, "image_sizes": image_sizes, "video_sizes": video_sizes}
         elif image_embed is not None and video_embed is None:
-            embeds = {"image_embed": image_embed}
+            embeds = {"image_embed": image_embed, "image_sizes": image_sizes}
         elif image_embed is None and video_embed is not None:
-            embeds = {"video_embed": video_embed}
+            embeds = {"video_embed": video_embed, "video_sizes": video_sizes}
         else:
             raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
         output = DataProto.from_dict(non_tensors=embeds)
@@ -2049,10 +2053,9 @@ class ActorRolloutRefWorker_llm(Worker):
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def update_actor(self, data: DataProto, encoder_embed: DataProto):
+    def update_actor(self, data: DataProto):
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
-        encoder_embed = encoder_embed.to(torch.cuda.current_device())
 
         assert self._is_actor
         if self._is_offload_param:
@@ -2064,7 +2067,7 @@ class ActorRolloutRefWorker_llm(Worker):
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
             # perform training
             with Timer(name="update_policy", logger=None) as timer:
-                metrics, encoder_gradients = self.actor.update_policy_llm(data=data, encoder_embed=encoder_embed)
+                metrics, encoder_gradients = self.actor.update_policy_llm(data=data)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
