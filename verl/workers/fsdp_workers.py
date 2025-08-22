@@ -1734,8 +1734,8 @@ class ActorRolloutRefWorker_llm(Worker):
 
                 _apply_liger_kernel_to_instance(model=actor_module)
                 
-            from verl.models.transformers.monkey_patch import apply_monkey_patch_llm
-            apply_monkey_patch_llm()
+            # from verl.models.transformers.monkey_patch import apply_monkey_patch_llm
+            # apply_monkey_patch_llm()
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 

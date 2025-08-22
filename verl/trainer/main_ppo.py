@@ -176,7 +176,7 @@ class TaskRunner:
 
         resource_pool_spec = {
             actor_rollout_encoder_id: [1],
-            actor_rollout_llm_id: [1],
+            actor_rollout_llm_id: [2],
         }
         # mapping = {
         #     Role.ActorRollout: actor_rollout_id,

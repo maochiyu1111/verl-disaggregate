@@ -348,7 +348,7 @@ def apply_monkey_patch_encoder():
     Qwen2_5_VisionTransformerPretrainedModel.encoder_forward = encoder_forward
     
 def apply_monkey_patch_llm():
-    from verl.models.transformers.qwen2_5_vl import llm_forward
-    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
-    Qwen2_5_VLModel.llm_forward = llm_forward
-    
+    # from verl.models.transformers.qwen2_5_vl import llm_forward
+    # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
+    # Qwen2_5_VLModel.llm_forward = llm_forward
+    pass
