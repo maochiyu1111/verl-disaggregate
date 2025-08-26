@@ -82,8 +82,12 @@ class DataParallelPPOEncoder(BasePPOEncoder):
             image_embed, video_embed = self.encoder_module.encoder_forward(
                 **multi_modal_inputs,
             )  # prevent model thinks we are generating
-
-        return  image_embed , video_embed
+            audio_features = None
+            if 'Omni' in self.encoder_module.__class__.__name__:
+            audio_features = self.encoder_module.feature_extractor_forward(
+                **multi_modal_inputs,
+            )
+        return image_embed, video_embed, audio_features
     
     # qzy note：先不处理encoder需要更新的情况
     # def _optimizer_step(self):
@@ -125,17 +129,18 @@ class DataParallelPPOEncoder(BasePPOEncoder):
             max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
             micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
         else:
-            micro_batches = data.split(micro_batch_size)        
+            micro_batches = data.split(micro_batch_size)
 
         image_embeds_list = []
         video_embeds_list = []
-
+        audio_features_list = []
         for micro_batch in micro_batches:
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                image_embeds, video_embeds = self._forward_micro_batch(model_inputs)
+                image_embeds, video_embeds,audio_features = self._forward_micro_batch(model_inputs)
             image_embeds_list.append(image_embeds)
             video_embeds_list.append(video_embeds)
+            audio_features_list.append(audio_features)
 
         def flatten_embeds(embeds_list: list):
             # 可能其中一个是None列表
@@ -147,7 +152,7 @@ class DataParallelPPOEncoder(BasePPOEncoder):
             
         image_embeds = flatten_embeds(image_embeds_list)
         video_embeds = flatten_embeds(video_embeds_list)
-            
-        return image_embeds, video_embeds
+        audio_features = flatten_embeds(audio_features_list)
+        return image_embeds, video_embeds,audio_features
 
   

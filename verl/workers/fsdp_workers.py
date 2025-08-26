@@ -1474,8 +1474,10 @@ class ActorRolloutRefWorker_encoder(Worker):
             #     tensors={"old_log_probs": output, "entropys": entropys},
             #     meta_info={"temperature": self.config.rollout.temperature},
             # )
-            image_embed, video_embed = self.actor.extract_feature(data=data)
+            image_embed, video_embed,audio_features = self.actor.extract_feature(data=data)
             output = DataProto.from_dict(tensors={"image_embed": image_embed, "video_embed": video_embed})
+            if audio_features is not None:
+                output = DataProto.from_dict(tensors={"image_embed": image_embed, "video_embed": video_embed,"audio":audio_features})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
@@ -1507,13 +1509,17 @@ class ActorRolloutRefWorker_encoder(Worker):
             data = self.ulysses_sharding_manager.preprocess_data(data)
             # output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
             # output = DataProto.from_dict(tensors={"ref_log_prob": output})
-            image_embed, video_embed = self.ref_policy.extract_feature(data=data)
+            image_embed, video_embed,audio_features = self.ref_policy.extract_feature(data=data)
             if image_embed is not None and video_embed is not None:
                 embeds = {"image_embed": image_embed, "video_embed": video_embed}
             elif image_embed is not None and video_embed is None:
                 embeds = {"image_embed": image_embed}
             elif image_embed is None and video_embed is not None:
                 embeds = {"video_embed": video_embed}
+            elif audio_features is not None:
+                embeds = {"audio": audio_features}
+            elif image_embed is not None and audio_features is not None:
+                embeds = {"image_embed": image_embed,"audio":audio_features}
             else:
                 raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
             output = DataProto.from_dict(non_tensors=embeds)
@@ -1735,7 +1741,9 @@ class ActorRolloutRefWorker_llm(Worker):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
         # 由于改了类名，这个地方匹配不到，自行编写config，仅针对本测试的代码
-        wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLDecoderLayer"],}
+        #wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLDecoderLayer"],}
+        wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_OmniDecoderLayer"],}
+        
         # auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)
 

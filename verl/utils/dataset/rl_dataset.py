@@ -189,7 +189,7 @@ class RLHFDataset(Dataset):
                 else:
                     def doc2len(doc) -> int:
                         messages = self._build_messages(doc)
-                        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)[0]
                         images = [process_image(image) for image in doc[image_key]] if image_key in doc else None
                         videos = [process_video(video) for video in doc[video_key]] if video_key in doc else None
 
