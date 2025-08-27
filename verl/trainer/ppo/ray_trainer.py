@@ -80,6 +80,8 @@ class Role(Enum):
     EncoderActor = 8
     LLMRef = 9
     LLMActor = 10
+    AudioEncoderRef = 11
+    AudioEncoderActor = 12
 
 
 @dataclass

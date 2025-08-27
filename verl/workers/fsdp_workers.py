@@ -1064,9 +1064,12 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
-            actor_module_class = Qwen2_5_VisionTransformerPretrainedModel
+            if 'omni' in model_path.lower():
+                from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniVisionEncoder
+                actor_module_class = Qwen2_5OmniVisionEncoder
+            else: 
+                from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+                actor_module_class = Qwen2_5_VisionTransformerPretrainedModel
 
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
@@ -1689,9 +1692,12 @@ class ActorRolloutRefWorker_llm(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            from verl.models.transformers.qwen2_5_vl import CustomQwen2_5_VLModel
-            actor_module_class = CustomQwen2_5_VLModel
-
+            if "omni" in model_path.lower():
+                from verl.models.transformers.qwen2_5_omni import CustomQwen2_5_OmniThinkerModel
+                actor_module_class = CustomQwen2_5_OmniThinkerModel
+            else:
+                from verl.models.transformers.qwen2_5_vl import CustomQwen2_5_VLModel
+                actor_module_class = CustomQwen2_5_VLModel
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
                 # only for disaggregate test
@@ -1741,8 +1747,10 @@ class ActorRolloutRefWorker_llm(Worker):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
         # 由于改了类名，这个地方匹配不到，自行编写config，仅针对本测试的代码
-        #wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLDecoderLayer"],}
-        wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_OmniDecoderLayer"],}
+        if 'omni' in model_path.lower():
+            wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_OmniDecoderLayer"],}
+        else:
+            wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLDecoderLayer"],}
         
         # auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)

@@ -24,7 +24,11 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VLForConditionalGeneration,
 )
 from transformers.utils import is_flash_attn_greater_or_equal
+from verl.utils.device import get_device_name
+from verl.models.transformers.monkey_patch import is_transformers_version_in_range
 
+# Import compatibility wrapper for flash_attn_supports_top_left_mask
+from verl.utils.transformers_compat import flash_attn_supports_top_left_mask
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
     gather_seq_scatter_heads,
@@ -33,8 +37,10 @@ from verl.utils.ulysses import (
 )
 
 try:
-    from transformers.modeling_flash_attention_utils import flash_attn_func, flash_attn_varlen_func
-
+    if get_device_name() == "npu":
+        from transformers.modeling_flash_attention_utils import flash_attn_func, flash_attn_varlen_func
+    else:
+        from flash_attn import flash_attn_func, flash_attn_varlen_func
     _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
 except ImportError:
     flash_attn_varlen_func = None

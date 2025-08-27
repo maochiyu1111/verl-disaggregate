@@ -161,35 +161,21 @@ class RLHFDataset(Dataset):
             if processor is not None:
                 from verl.utils.dataset.vision_utils import process_image, process_video
                 #from verl.utils.dataset.audio_utils import process_audio
-                '''
-                if processor.feature_extractor_class.__class__.__name__=="WhisperFeatureExtractor":
-                    from qwen_omni_utils import process_mm_info
+                #if processor.feature_extractor_class.__class__.__name__=="WhisperFeatureExtractor":
+                if self.is_omni:
+                    from qwen_omni_utils import process_audio_info
                     def doc2len(doc) -> int:
                         messages = self._build_messages(doc)
                         raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)[0]
-
-                        audios, images, videos, video_kwargs = process_mm_info(messages, use_audio_in_video=True, return_video_kwargs=True)
-                        model_inputs = processor(text=[raw_prompt], images=images, videos=videos, audio=audios, padding=True,
-                                                  return_tensors="pt", use_audio_in_video=True, **video_kwargs)
-                        input_ids = model_inputs.pop("input_ids")[0]
-
-                        return len(input_ids)
-                else:
-                '''
-                #if processor.feature_extractor_class.__class__.__name__=="WhisperFeatureExtractor":
-                if self.is_omni:
-                    def doc2len(doc) -> int:
-                        messages = self._build_messages(doc)
-                        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-                        #images = [process_image(image) for image in messages.pop(image_key)] if image_key in messages else None
-                        #videos = [process_video(video) for video in messages.pop(video_key)] if video_key in messages else None
-                        #audios = [process_audio(audio) for audio in messages.pop(audio_key)] if audio_key in messages else None
-                        audios, images, videos = process_mm_info(messages, use_audio_in_video=self.use_audio_in_video)
+                        images = [process_image(image) for image in doc[image_key]] if image_key in doc else None
+                        videos = [process_video(video) for video in doc[video_key]] if video_key in doc else None
+                        audios = [process_audio_info(audio,use_audio_in_video=self.use_audio_in_video) for audio in messages.pop(audio_key)] if audio_key in messages else None
+                        #audios, images, videos = process_mm_info(messages, use_audio_in_video=self.use_audio_in_video)
                         return len(processor(text=[raw_prompt],audio=audios,images=images, return_tensors="pt")["input_ids"][0])
                 else:
                     def doc2len(doc) -> int:
                         messages = self._build_messages(doc)
-                        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)[0]
+                        raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
                         images = [process_image(image) for image in doc[image_key]] if image_key in doc else None
                         videos = [process_video(video) for video in doc[video_key]] if video_key in doc else None
 

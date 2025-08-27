@@ -330,7 +330,6 @@ class vLLMRollout(BaseRollout):
         with self.update_sampling_params(**kwargs):
             outputs = self.inference_engine.generate(
                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
-
                 sampling_params=self.sampling_params,
                 lora_request=lora_requests,
                 use_tqdm=False,

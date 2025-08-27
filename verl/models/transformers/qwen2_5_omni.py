@@ -16,6 +16,8 @@ from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import Qwen2_5Omni
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniAudioEncoder, Qwen2_5OmniVisionBlock,Qwen2_5OmniThinkerCausalLMOutputWithPast
 from typing import Optional, Tuple, List
 import torch
+import torch.nn as nn
+from typing import Optional, Union
 def llm_forward(
     self,
     input_ids: Optional[torch.LongTensor] = None,
@@ -581,3 +583,19 @@ def get_rope_index_omni(
             mrope_position_deltas = max_position_ids + 1 - torch.sum(attention_mask, dim=-1, keepdim=True)
 
             return position_ids, mrope_position_deltas
+
+# for disaggregate
+# forward for LLM
+# patch Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
+from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration,Qwen2_5OmniPreTrainedModel
+class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerForConditionalGeneration):
+    _tied_weights_keys = ["lm_head.weight"]
+    def __init__(self, config):
+        Qwen2_5OmniPreTrainedModel.__init__(self, config)
+        self.language_model = Qwen2_5OmniPreTrainedModel._from_config(config)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.rope_deltas = None  # cache rope_deltas here
+
+        # Initialize weights and apply final processing
+        self.post_init()
+    

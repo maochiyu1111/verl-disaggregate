@@ -163,15 +163,18 @@ class TaskRunner:
         # global_pool_id = "global_pool"
         actor_rollout_id = "actor_rollout_pool"
         ref_id = "ref_pool"
+        ref_dis_id = "ref_dis_pool"
 
         # resource_pool_spec = {
         #     global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         # }
 
         resource_pool_spec = {
-            actor_rollout_id: [6],
+            actor_rollout_id: [1],
             ref_id: [1],
+            ref_dis_id: [1],
         }
+
         mapping = {
             Role.ActorRollout: actor_rollout_id,
             Role.Critic: actor_rollout_id,
@@ -197,11 +200,14 @@ class TaskRunner:
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = ref_id
-            # from verl.workers.fsdp_workers import ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
-            # role_worker_mapping[Role.EncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
-            # role_worker_mapping[Role.LLMRef] = ray.remote(ActorRolloutRefWorker_llm)
-            # mapping[Role.EncoderRef] = ref_encoder_id
-            # mapping[Role.LLMRef] = ref_llm_id
+            from verl.workers.fsdp_workers import ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
+            role_worker_mapping[Role.EncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
+            role_worker_mapping[Role.LLMRef] = ray.remote(ActorRolloutRefWorker_llm)
+            # Audio encoder using the same class as LLMRef for simplicity
+            role_worker_mappng[Role.AudioEncoderRef] = ray.remote(ActorRolloutRefWorker_llm)  
+            mapping[Role.EncoderRef] = ref_dis_id
+            mapping[Role.LLMRef] = ref_dis_id
+            mapping[Role.AudioEncoderRef] = ref_dis_id
 
         # Load the reward manager for training and validation.
         reward_fn = load_reward_manager(
