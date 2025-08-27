@@ -1345,7 +1345,7 @@ class RayPPOTrainer:
                             actor_output = self.actor_rollout_llm_wg.update_actor(batch)
                             encoder_input = batch.pop(non_tensor_batch_keys=["multi_modal_inputs"])
                             # expecting None to be DataProto, but got <class 'NoneType'>
-                            self.actor_rollout_encoder_wg.update_actor(actor_output, encoder_input)
+                            actor_output = self.actor_rollout_encoder_wg.update_actor(actor_output, encoder_input)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

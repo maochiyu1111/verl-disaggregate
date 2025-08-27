@@ -175,7 +175,7 @@ class TaskRunner:
         # }
 
         resource_pool_spec = {
-            actor_rollout_encoder_id: [1],
+            actor_rollout_encoder_id: [2],
             actor_rollout_llm_id: [2],
         }
         # mapping = {

@@ -132,9 +132,9 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         for micro_batch in micro_batches:
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                image_embeds, video_embeds = self._forward_micro_batch(model_inputs)
-            image_embeds_list.append(image_embeds)
-            video_embeds_list.append(video_embeds)
+                image_embeds, video_embeds, image_split_sizes, video_split_sizes = self._forward_micro_batch(model_inputs)
+            image_embeds_list.append(torch.split(image_embeds, image_split_sizes) if image_embeds is not None else None)
+            video_embeds_list.append(torch.split(video_embeds, video_split_sizes) if video_embeds is not None else None)
 
         def flatten_embeds(embeds_list: list):
             # 可能其中一个是None列表
