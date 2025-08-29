@@ -148,18 +148,17 @@ class DataParallelPPOEncoder(BasePPOEncoder):
                 image_embeds_list.append(image_embeds)
                 video_embeds_list.append(video_embeds)
 
-
-        def flatten_embeds(embeds_list: list):
+        def flatten_embeds(embeds_list: list, _split=False):
             # 可能其中一个是None列表
             if not embeds_list or embeds_list[0] is None:
                 return None
             # DataProto.from_dict会将non_tensor转成numpy数组，不支持bf16
-            if split:
+            if _split:
                 return [tensor.cpu().to(dtype=torch.float32) for tensor in embeds_list]
-            return [tensor.cpu().to(dtype=torch.float32) for tensor_tuple in embeds_list for tensor in tensor_tuple]
-            
-        image_embeds = flatten_embeds(image_embeds_list)
-        video_embeds = flatten_embeds(video_embeds_list)
+            return [tensor.cpu().to(dtype=torch.float32) for tensor_tuple in embeds_list for tensor in tensor_tuple]  
+
+        image_embeds = flatten_embeds(image_embeds_list, _split=split)
+        video_embeds = flatten_embeds(video_embeds_list, _split=split)
 
         return image_embeds, video_embeds
     

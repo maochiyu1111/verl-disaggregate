@@ -1524,6 +1524,56 @@ class ActorRolloutRefWorker_encoder(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_log_prob_encoder(self, data: DataProto):
+        assert self._is_actor
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        # Support all hardwares
+        data = data.to(torch.cuda.current_device())
+        # we should always recompute old_log_probs when it is HybridEngine
+        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        # perform recompute log_prob
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            # output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            # output = DataProto.from_dict(
+            #     tensors={"old_log_probs": output, "entropys": entropys},
+            #     meta_info={"temperature": self.config.rollout.temperature},
+            # )
+            image_embed, video_embed = self.actor.extract_feature(data=data, split=True)
+
+            if image_embed is not None and video_embed is not None:
+                embeds = {"image_embed": image_embed, "video_embed": video_embed}
+            elif image_embed is not None and video_embed is None:
+                embeds = {"image_embed": image_embed}
+            elif image_embed is None and video_embed is not None:
+                embeds = {"video_embed": video_embed}
+            else:
+                raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
+
+            output = DataProto.from_dict(non_tensors=embeds)
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        print(f'DEBUG: compute_log_prob_encoder: {len(output.non_tensor_batch["image_embed"])}')
+
+        output = output.to("cpu")
+
+        # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
+        # unshard the root FSDP module
+        if self.world_size > 1 and fsdp_version(self.actor.encoder_module) == 1:
+            self.actor.encoder_module._handle.reshard(True)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
+
+        return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob_encoder(self, data: DataProto):
         assert self._is_ref
 
@@ -1539,7 +1589,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             data = self.ulysses_sharding_manager.preprocess_data(data)
             # output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
             # output = DataProto.from_dict(tensors={"ref_log_prob": output})
-            image_embed, video_embed = self.ref_policy.extract_feature(data=data)
+            image_embed, video_embed = self.ref_policy.extract_feature(data=data, split=True)
             if image_embed is not None and video_embed is not None:
                 embeds = {"image_embed": image_embed, "video_embed": video_embed}
             elif image_embed is not None and video_embed is None:
@@ -1548,6 +1598,7 @@ class ActorRolloutRefWorker_encoder(Worker):
                 embeds = {"video_embed": video_embed}
             else:
                 raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
+
             output = DataProto.from_dict(non_tensors=embeds)
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
