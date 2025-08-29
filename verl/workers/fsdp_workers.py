@@ -742,12 +742,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             output = self.rollout_sharding_manager.postprocess_data(output)
 
+        output = output.to("cpu")
         timing_generate.update(self.rollout_sharding_manager.timing)
         # We calculate the average timing across all ranks
         # to make sure meta_info["timing"] is the same
         timing_generate = reduce_timing(timing_generate)
         output.meta_info["timing"] = timing_generate
-        output = output.to("cpu")
 
         # clear kv cache
         get_torch_device().empty_cache()
@@ -1395,13 +1395,13 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
-            self.checkpoint_manager = FSDPCheckpointManager(
-                model=self.actor_module_fsdp,
-                optimizer=self.actor.encoder_optimizer,
-                lr_scheduler=self.actor_lr_scheduler,
-                processing_class=self.processor if self.processor is not None else self.tokenizer,
-                checkpoint_config=self.config.actor.checkpoint,
-            )
+            # self.checkpoint_manager = FSDPCheckpointManager(
+            #     model=self.actor_module_fsdp,
+            #     optimizer=self.actor.encoder_optimizer,
+            #     lr_scheduler=self.actor_lr_scheduler,
+            #     processing_class=self.processor if self.processor is not None else self.tokenizer,
+            #     checkpoint_config=self.config.actor.checkpoint,
+            # )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto, encoder_input: DataProto):
@@ -1476,31 +1476,38 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         return output
 
-    
-    
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_log_prob_encoder(self, data: DataProto):
-        assert self._is_actor
+    def rollout_forward(self, data: DataProto):
+        assert self._is_rollout
         if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)  
 
         # Support all hardwares
         data = data.to(torch.cuda.current_device())
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
-        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
-        # perform recompute log_prob
+        data.meta_info["use_dynamic_bsz"] = False
+
+        assert "multi_modal_inputs" in data.non_tensor_batch.keys(), f'{data.non_tensor_batch.keys()}'
+
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            # output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-            # output = DataProto.from_dict(
-            #     tensors={"old_log_probs": output, "entropys": entropys},
-            #     meta_info={"temperature": self.config.rollout.temperature},
-            # )
-            image_embed, video_embed = self.actor.extract_feature(data=data)
-            output = DataProto.from_dict(tensors={"image_embed": image_embed, "video_embed": video_embed})
+            # dist_log(f'rollout_forward: {len(data.non_tensor_batch["multi_modal_data"])} {data.non_tensor_batch["multi_modal_data"][0]["pixel_values"].shape}')
+            image_embed, video_embed = self.actor.extract_feature(data=data, split=True)
+            if image_embed is not None and video_embed is not None:
+                embeds = {"image_embed": image_embed, "video_embed": video_embed}
+            elif image_embed is not None and video_embed is None:
+                embeds = {"image_embed": image_embed}
+            elif image_embed is None and video_embed is not None:
+                embeds = {"video_embed": video_embed}
+            else:
+                raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
+            #dist_log(f'img_grid_thw: {len(data.non_tensor_batch["multi_modal_data"])}, img_embd: {len(image_embed)}')
+            vllm_input = []
+            print(f'DEBUG: {len(image_embed)} {len(data.non_tensor_batch["multi_modal_inputs"])}')
+            for embd, grid in zip(image_embed,data.non_tensor_batch["multi_modal_inputs"]):
+                vllm_input.append({"image": {"image_embeds": embd, "image_grid_thw": grid["image_grid_thw"]}})
+            output = DataProto.from_dict(non_tensors={"multi_modal_data":vllm_input})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
@@ -1721,9 +1728,9 @@ class ActorRolloutRefWorker_llm(Worker):
             )
             # 遇到报错，actor_module在meta，fsdp在cuda:0
             actor_module = actor_module.to_empty(device=torch.device("cuda", torch.cuda.current_device()), recurse=True)
-            lm_head_sd = torch.load("/workspace/models/qwen2.5vl-lm_head.pt")
-            llm_sd = torch.load("/workspace/models/qwen2.5vl-3b-llm.pt")
-            actor_module.lm_head.load_state_dict(lm_head_sd)
+            #lm_head_sd = torch.load("/workspace/models/qwen2.5vl-lm_head.pt")
+            llm_sd = torch.load("/workspace/yym/models/qwen2.5vl-3b-llm.pt")
+            #actor_module.lm_head.load_state_dict(lm_head_sd)
             actor_module.language_model.load_state_dict(llm_sd)
             # breakpoint()
 
@@ -1878,8 +1885,10 @@ class ActorRolloutRefWorker_llm(Worker):
             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.llm.path, use_shm=self.config.model.get("use_shm", False))
+            local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get("use_shm", False))
             from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+            from verl.models.vllm.monkey_patch import vllm_monkey_patch_llm
+            vllm_monkey_patch_llm()
 
             vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
             rollout = vllm_rollout_cls(
@@ -2023,8 +2032,8 @@ class ActorRolloutRefWorker_llm(Worker):
             self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
-            # self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
-            pass
+            self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            # pass
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
@@ -2107,28 +2116,28 @@ class ActorRolloutRefWorker_llm(Worker):
             "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
+        timing_generate = {}
         with self.rollout_sharding_manager:
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-
-            if self.config.rollout.name == "sglang_async":
-                from verl.workers.rollout.sglang_rollout import AsyncSGLangRollout
-
-                if isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout, "_tool_schemas") and len(self.rollout._tool_schemas) > 0:
-                    output = self.rollout.generate_sequences_with_tools(prompts=prompts)
-                else:
-                    output = self.rollout.generate_sequences(prompts=prompts)
-            else:
+            with simple_timer("generate_sequences", timing_generate):
                 output = self.rollout.generate_sequences(prompts=prompts)
+
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
 
+        timing_generate.update(self.rollout_sharding_manager.timing)
+        # We calculate the average timing across all ranks
+        # to make sure meta_info["timing"] is the same
+        timing_generate = reduce_timing(timing_generate)
+        output.meta_info["timing"] = timing_generate
+
         # clear kv cache
-        torch.cuda.empty_cache()
+        get_torch_device().empty_cache()
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)

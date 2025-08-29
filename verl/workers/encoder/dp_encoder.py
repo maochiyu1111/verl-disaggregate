@@ -104,7 +104,7 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         return grad_norm
 
     @GPUMemoryLogger(role="dp Encoder", logger=logger)
-    def extract_feature(self, data: DataProto) -> torch.Tensor:
+    def extract_feature(self, data: DataProto, split=False) -> torch.Tensor:
         """extract features given a batch of data
         """
         # set to eval
@@ -130,23 +130,37 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         video_embeds_list = []
 
         for micro_batch in micro_batches:
-            model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            if micro_batch.batch is None:
+                model_inputs = {**micro_batch.non_tensor_batch}
+            else:
+                model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                image_embeds, video_embeds = self._forward_micro_batch(model_inputs)
-            image_embeds_list.append(image_embeds)
-            video_embeds_list.append(video_embeds)
+                image_embeds, video_embeds, image_split_sizes, video_split_sizes = self._forward_micro_batch(model_inputs)
+            if split:
+                image_embeds = torch.split(image_embeds, image_split_sizes)
+                video_embeds = torch.split(video_embeds, video_split_sizes) if video_embeds is not None else None
+                image_embeds_list.extend(image_embeds)
+                if video_embeds is not None:
+                    video_embeds_list.extend(video_embeds)
+                else:
+                    video_embeds_list.append(video_embeds)
+            else:
+                image_embeds_list.append(image_embeds)
+                video_embeds_list.append(video_embeds)
+
 
         def flatten_embeds(embeds_list: list):
             # 可能其中一个是None列表
             if not embeds_list or embeds_list[0] is None:
                 return None
             # DataProto.from_dict会将non_tensor转成numpy数组，不支持bf16
+            if split:
+                return [tensor.cpu().to(dtype=torch.float32) for tensor in embeds_list]
             return [tensor.cpu().to(dtype=torch.float32) for tensor_tuple in embeds_list for tensor in tensor_tuple]
-        
             
         image_embeds = flatten_embeds(image_embeds_list)
         video_embeds = flatten_embeds(video_embeds_list)
-            
+
         return image_embeds, video_embeds
     
     @GPUMemoryLogger(role="dp Encoder", logger=logger)

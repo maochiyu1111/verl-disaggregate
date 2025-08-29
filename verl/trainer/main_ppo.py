@@ -169,14 +169,18 @@ class TaskRunner:
         # global_pool_id = "global_pool"
         actor_rollout_encoder_id = "actor_rollout_encoder_pool"
         actor_rollout_llm_id = "actor_rollout_llm_pool"
+        ref_encoder_id = "ref_encoder_pool"
+        ref_llm_id = "ref_llm_pool"
 
         # resource_pool_spec = {
         #     global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         # }
 
         resource_pool_spec = {
-            actor_rollout_encoder_id: [1],
-            actor_rollout_llm_id: [2],
+            actor_rollout_encoder_id: [2],
+            actor_rollout_llm_id: [4],
+            ref_encoder_id: [1],
+            ref_llm_id: [1]
         }
         # mapping = {
         #     Role.ActorRollout: actor_rollout_id,
@@ -210,8 +214,8 @@ class TaskRunner:
             # mapping[Role.RefPolicy] = ref_id
             role_worker_mapping[Role.EncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
             role_worker_mapping[Role.LLMRef] = ray.remote(ActorRolloutRefWorker_llm)
-            mapping[Role.EncoderRef] = actor_rollout_encoder_id
-            mapping[Role.LLMRef] = actor_rollout_llm_id
+            mapping[Role.EncoderRef] = ref_encoder_id
+            mapping[Role.LLMRef] = ref_llm_id
 
         # Load the reward manager for training and validation.
         reward_fn = load_reward_manager(

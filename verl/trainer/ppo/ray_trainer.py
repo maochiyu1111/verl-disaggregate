@@ -1138,41 +1138,51 @@ class RayPPOTrainer:
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
                 # # pop those keys for generation
-                # batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-                # non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
-                # if "multi_modal_data" in batch.non_tensor_batch:
-                #     non_tensor_batch_keys_to_pop.append("multi_modal_data")
-                # if "raw_prompt" in batch.non_tensor_batch:
-                #     non_tensor_batch_keys_to_pop.append("raw_prompt")
-                # if "tools_kwargs" in batch.non_tensor_batch:
-                #     non_tensor_batch_keys_to_pop.append("tools_kwargs")
-                # if "interaction_kwargs" in batch.non_tensor_batch:
-                #     non_tensor_batch_keys_to_pop.append("interaction_kwargs")
-                # if "index" in batch.non_tensor_batch:
-                #     non_tensor_batch_keys_to_pop.append("index")
-                # if "agent_name" in batch.non_tensor_batch:
-                #     non_tensor_batch_keys_to_pop.append("agent_name")
+                batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+                non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+                if "multi_modal_data" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("multi_modal_data")
+                if "raw_prompt" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("raw_prompt")
+                if "tools_kwargs" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("tools_kwargs")
+                if "interaction_kwargs" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("interaction_kwargs")
+                if "index" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("index")
+                if "agent_name" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("agent_name")
 
-                # gen_batch = batch.pop(
-                #     batch_keys=batch_keys_to_pop,
-                #     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
-                # )
+                if self.disaggregate_actor_rollout:
+                    modality_dict = {"multi_modal_inputs": batch.non_tensor_batch["multi_modal_inputs"]}
+                    modality_batch = DataProto.from_dict(non_tensors=modality_dict)
+                    modality_batch = modality_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+
+                gen_batch = batch.pop(
+                    batch_keys=batch_keys_to_pop,
+                    non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+                )
 
                 # # pass global_steps to trace
-                # gen_batch.meta_info["global_steps"] = self.global_steps
-                # gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                gen_batch.meta_info["global_steps"] = self.global_steps
+                gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
                 is_last_step = self.global_steps >= self.total_training_steps
 
                 with marked_timer("step", timing_raw):
                     # # generate a batch
-                    # with marked_timer("gen", timing_raw, color="red"):
-                    #     if not self.async_rollout_mode:
-                    #         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                    #     else:
-                    #         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
-                    #     timing_raw.update(gen_batch_output.meta_info["timing"])
-                    #     gen_batch_output.meta_info.pop("timing", None)
+                    with marked_timer("gen", timing_raw, color="red"):
+                        if not self.async_rollout_mode:
+                            if self.disaggregate_actor_rollout:
+                                modality_embeddings = self.actor_rollout_encoder_wg.rollout_forward(modality_batch)
+                                gen_batch.non_tensor_batch["multi_modal_data"] = modality_embeddings.non_tensor_batch["multi_modal_data"]
+                                gen_batch_output = self.actor_rollout_llm_wg.generate_sequences(gen_batch)
+                            else:
+                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                        else:
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                        timing_raw.update(gen_batch_output.meta_info["timing"])
+                        gen_batch_output.meta_info.pop("timing", None)
 
                     # if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                     #     if self.reward_fn is None:
