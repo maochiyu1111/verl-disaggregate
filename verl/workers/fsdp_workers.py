@@ -985,14 +985,21 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         self._is_actor = self.role == "encoder_actor_rollout"
         self._is_rollout = self.role == "encoder_actor_rollout"
-        self._is_ref = self.role == ["encoder_ref","audioencoder_ref"]
+        self._is_ref = self.role in ["encoder_ref","audioencoder_ref"]
         self._is_audio = self.role in ["audioencoder_actor","audioencoder_ref"]
-        self._is_vision = self.role in ["encoder_ref","encoder_actor"]
+        self._is_vision = self.role in ["encoder_ref","encoder_actor","encoder_actor_rollout"]
         profiler_config = omega_conf_to_dataclass(config.get("profiler"))
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, option=self.profile_option)
         )
-        
+        if self._is_vision:
+            self.encoderpath = self.config.model.encoder.get("path", None)
+            assert self.encoderpath is not None, "Please provide the encoder model path in config.model"
+        elif self._is_audio:
+            self.encoderpath = self.config.model.audioencoder.get("path", None)
+            assert self.encoderpath is not None, "Please provide the audio encoder model path in config.model.audioencoder.path"
+        else:
+            self.encoderpath = self.config.model.encoder.get("path", None)
         self._is_offload_param = False
         self._is_offload_optimizer = False
         # 目前来看，可以保持原有设置，即在offload设置上，encoder保持原actor与ref的设置，不自行新增设置
@@ -1039,7 +1046,6 @@ class ActorRolloutRefWorker_encoder(Worker):
         # normalize ref config
         if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-            self.conf
 
     def _build_model_optimizer(
         self,
@@ -1079,7 +1085,14 @@ class ActorRolloutRefWorker_encoder(Worker):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        if 'omni' in model_path.lower():
+            if self._is_vision:
+                actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config.vision_config
+            if self._is_audio:
+                actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config.audio_config
+            #config file differ from tf's define! load from config file directly
+        else:
+            actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
 
         # encoder doesn't need generation_config
         # self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
@@ -1093,8 +1106,12 @@ class ActorRolloutRefWorker_encoder(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             if 'omni' in model_path.lower():
-                from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniVisionEncoder
-                actor_module_class = Qwen2_5OmniVisionEncoder
+                from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniVisionEncoder,Qwen2_5OmniAudioEncoder
+                from verl.models.transformers.qwen2_5_omni import CustomQwen2_5OmniVisionEncoder,CustomQwen2_5OmniAudioEncoder
+                if self._is_vision:
+                    actor_module_class = CustomQwen2_5OmniVisionEncoder
+                if self._is_audio:
+                    actor_module_class = CustomQwen2_5OmniAudioEncoder
             else: 
                 # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
                 # actor_module_class = Qwen2_5_VisionTransformerPretrainedModel
@@ -1147,8 +1164,13 @@ class ActorRolloutRefWorker_encoder(Worker):
             buffer_dtype = torch.float32
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
-
-        wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLVisionBlock"],}
+        if 'omni' in model_path.lower():
+            if self._is_vision:
+                wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5OmniVisionBlock"],}
+            if self._is_audio:
+                wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5OmniAudioEncoderLayer"],}
+        else:
+            wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLVisionBlock"],}
         # auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)
 
@@ -1262,7 +1284,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.encoder.path, use_shm=self.config.model.get("use_shm", False))
+            local_path = copy_to_local(self.encoderpath, use_shm=self.config.model.get("use_shm", False))
             from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
 
             vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
@@ -1303,7 +1325,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-            local_path = copy_to_local(self.config.model.encoder.path)
+            local_path = copy_to_local(self.encoderpath)
             rollout = SGLangRollout(
                 actor_module=local_path,
                 config=self.config.rollout,
@@ -1331,7 +1353,7 @@ class ActorRolloutRefWorker_encoder(Worker):
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=None)
             rollout = AsyncSGLangRollout(
-                actor_module=self.config.model.encoder.path,
+                actor_module=self.encoderpath,
                 config=self.config.rollout,
                 tokenizer=self.tokenizer,
                 model_hf_config=self.actor_model_config,
@@ -1378,7 +1400,7 @@ class ActorRolloutRefWorker_encoder(Worker):
                 fsdp_config = OmegaConf.create()
             self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = (
                 self._build_model_optimizer(
-                    model_path=self.config.model.encoder.path,
+                    model_path=self.encoderpath,
                     # model_path=self.config.model.path,
                     fsdp_config=fsdp_config,
                     optim_config=optim_config,
@@ -1417,7 +1439,7 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
-                model_path=self.config.model.encoder.path,
+                model_path=self.encoderpath,
                 fsdp_config=self.config.ref.fsdp_config,
                 optim_config=None,
                 override_model_config=override_model_config,
@@ -1792,9 +1814,17 @@ class ActorRolloutRefWorker_llm(Worker):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        if 'omni' in model_path.lower():
+            from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import Qwen2_5OmniThinkerConfig,Qwen2_5OmniTextConfig
+            #actor_model_config = Qwen2_5OmniThinkerConfig(text_config=Qwen2_5OmniTextConfig(vocab_size=151936,hidden_size=2048,intermediate_size=11008))
+            #config file differ from tf's define! load from config file directly
+            from transformers.configuration_utils import PretrainedConfig
+            actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config.text_config
+            self.generation_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config
+        else:
+            actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+            self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
-        self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
         override_config_kwargs = {
             "bos_token_id": self.tokenizer.bos_token_id,
@@ -1841,6 +1871,7 @@ class ActorRolloutRefWorker_llm(Worker):
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
 
                 apply_monkey_patch(model=actor_module, ulysses_sp_size=self.ulysses_sequence_parallel_size)
+                
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
@@ -1876,12 +1907,12 @@ class ActorRolloutRefWorker_llm(Worker):
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
         # 由于改了类名，这个地方匹配不到，自行编写config，仅针对本测试的代码
         if 'omni' in model_path.lower():
-            wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_OmniDecoderLayer"],}
+            wrap_config = {"transformer_layer_cls_to_wrap": ["model.Qwen2_5_OmniDecoderLayer"],}
         else:
             wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLDecoderLayer"],}
         
-        # auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)
+        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
+        #auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)
 
         if self._is_rollout and self.config.rollout.name == "hf":
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma

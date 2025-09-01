@@ -17,10 +17,11 @@ python3 -m verl.trainer.main_ppo \
     data.image_key=images \
     actor_rollout_ref.model.path=/share/models/qwen2.5/qwen2.5-omni-3b \
     +actor_rollout_ref.model.encoder.path=/workspace/models/qwen2.5omni-3b-encoder \
+    +actor_rollout_ref.model.audioencoder.path=/workspace/models/qwen2.5omni-audio \
     +actor_rollout_ref.model.llm.path=/workspace/models/qwen2.5omni-3b-llm \
     actor_rollout_ref.is_omni=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.use_remove_padding=False \
     actor_rollout_ref.actor.ppo_mini_batch_size=24 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=10 \
     actor_rollout_ref.actor.use_kl_loss=True \
@@ -43,7 +44,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     trainer.project_name='0807_verl_qwen2_5_vl_3b' \
     trainer.experiment_name='0807_verl_qwen2_5_vl_3b' \
     trainer.n_gpus_per_node=3 \

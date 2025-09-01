@@ -83,8 +83,8 @@ class DataParallelPPOEncoder(BasePPOEncoder):
                 **multi_modal_inputs,
             )  # prevent model thinks we are generating
             audio_features = None
-            if 'Omni' in self.encoder_module.__class__.__name__:
-                audio_features = self.encoder_module.feature_extractor_forward(
+            if 'Audio' in self.encoder_module.__class__.__name__:
+                audio_features = self.encoder_module.forward(
                     **multi_modal_inputs,
                 )
         return image_embed, video_embed, audio_features, image_split_sizes, video_split_sizes
