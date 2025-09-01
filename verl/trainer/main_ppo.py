@@ -170,7 +170,7 @@ class TaskRunner:
         # }
 
         resource_pool_spec = {
-            actor_rollout_id: [1],
+            actor_rollout_id: [2],
             ref_id: [1],
             ref_dis_id: [1],
         }
@@ -198,17 +198,16 @@ class TaskRunner:
 
         # Add a reference policy worker if KL loss or KL reward is used.
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
-            mapping[Role.RefPolicy] = ref_id
             from verl.workers.fsdp_workers import ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
+            # role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+            # mapping[Role.RefPolicy] = ref_id
             role_worker_mapping[Role.EncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
             role_worker_mapping[Role.LLMRef] = ray.remote(ActorRolloutRefWorker_llm)
             # Audio encoder using the same class as LLMRef for simplicity
-            role_worker_mappng[Role.AudioEncoderRef] = ray.remote(ActorRolloutRefWorker_llm)  
             mapping[Role.EncoderRef] = ref_dis_id
-            mapping[Role.LLMRef] = ref_dis_id
+            mapping[Role.LLMRef] = ref_id
+            role_worker_mapping[Role.AudioEncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
             mapping[Role.AudioEncoderRef] = ref_dis_id
-
         # Load the reward manager for training and validation.
         reward_fn = load_reward_manager(
             config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})

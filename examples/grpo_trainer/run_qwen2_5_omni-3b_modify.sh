@@ -1,4 +1,5 @@
 set -x
+export HYDRA_FULL_ERROR=1
 ENGINE=${1:-vllm}
 # If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
 # export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -26,6 +27,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
+    actor_rollout_ref.actor.strategy=fsdp \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -44,7 +46,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name='0807_verl_qwen2_5_vl_3b' \
     trainer.experiment_name='0807_verl_qwen2_5_vl_3b' \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=3 \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
     trainer.test_freq=10 \

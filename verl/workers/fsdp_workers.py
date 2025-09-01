@@ -971,13 +971,14 @@ class ActorRolloutRefWorker_encoder(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.role = role
-        assert self.role in ["encoder_ref", "encoder_actor"]
+        assert self.role in ["encoder_ref", "encoder_actor","audioencoder_actor","audioencoder_ref"]
 
         self._is_actor = self.role == "encoder_actor"
         # 由于actor和rollout一定共享硬件资源（hybrid engine）因此省略encoder_rollout，合并到encoder_actor
         self._is_rollout = self.role == "encoder_actor"
-        self._is_ref = self.role == "encoder_ref"
-
+        self._is_ref = self.role == ["encoder_ref","audioencoder_ref"]
+        self._is_audio = self.role in ["audioencoder_actor","audioencoder_ref"]
+        self._is_vision = self.role in ["encoder_ref","encoder_actor"]
         self._is_offload_param = False
         self._is_offload_optimizer = False
         # 目前来看，可以保持原有设置，即在offload设置上，encoder保持原actor与ref的设置，不自行新增设置
@@ -1334,7 +1335,7 @@ class ActorRolloutRefWorker_encoder(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.workers.encoder import DataParallelPPOEncoder 
+        from verl.workers.encoder import DataParallelPPOEncoder
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
@@ -1353,17 +1354,19 @@ class ActorRolloutRefWorker_encoder(Worker):
             else:
                 optim_config = None
                 fsdp_config = OmegaConf.create()
-            self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
-                model_path=self.config.model.encoder.path,
-                # model_path=self.config.model.path,
-                fsdp_config=fsdp_config,
-                optim_config=optim_config,
-                override_model_config=override_model_config,
-                use_remove_padding=use_remove_padding,
-                enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
-                trust_remote_code=self.config.model.get("trust_remote_code", False),
-                use_liger=self.config.model.get("use_liger", False),
-                role="actor",
+            self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = (
+                self._build_model_optimizer(
+                    model_path=self.config.model.encoder.path,
+                    # model_path=self.config.model.path,
+                    fsdp_config=fsdp_config,
+                    optim_config=optim_config,
+                    override_model_config=override_model_config,
+                    use_remove_padding=use_remove_padding,
+                    enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
+                    trust_remote_code=self.config.model.get("trust_remote_code", False),
+                    use_liger=self.config.model.get("use_liger", False),
+                    role="actor",
+                )
             )
 
             # get the original unwrapped module
@@ -1382,10 +1385,14 @@ class ActorRolloutRefWorker_encoder(Worker):
             OmegaConf.set_struct(self.config.actor, True)
             with open_dict(self.config.actor):
                 self.config.actor.use_remove_padding = use_remove_padding
-            self.actor = DataParallelPPOEncoder(config=self.config.actor, encoder_module=self.actor_module_fsdp, encoder_optimizer=self.actor_optimizer)
+            self.actor = DataParallelPPOEncoder(
+                config=self.config.actor, encoder_module=self.actor_module_fsdp, encoder_optimizer=self.actor_optimizer
+            )
 
         if self._is_rollout:
-            self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            self.rollout, self.rollout_sharding_manager = self._build_rollout(
+                trust_remote_code=self.config.model.get("trust_remote_code", False)
+            )
 
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
@@ -1596,6 +1603,7 @@ class ActorRolloutRefWorker_llm(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.role = role
+        print(role)
         # 这部分改动同encoder
         assert self.role in ["llm_ref", "llm_actor"]
 

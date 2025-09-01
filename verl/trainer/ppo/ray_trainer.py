@@ -108,7 +108,7 @@ class ResourcePoolManager:
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=1, name_prefix=resource_pool_name
+                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -358,10 +358,10 @@ class RayPPOTrainer:
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = Role.RefPolicy in role_worker_mapping or Role.EncoderRef in role_worker_mapping
+        self.use_reference_policy = Role.RefPolicy in role_worker_mapping or Role.EncoderRef in role_worker_mapping or Role.AudioEncoderRef in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
-        self.disaggregate_ref = Role.EncoderRef in role_worker_mapping
-        self.disaggregate_actor = Role.EncoderActor in role_worker_mapping
+        self.disaggregate_ref = Role.EncoderRef in role_worker_mapping or Role.AudioEncoderRef in role_worker_mapping
+        self.disaggregate_actor = Role.EncoderActor in role_worker_mapping or Role.AudioEncoderActor in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -818,6 +818,9 @@ class RayPPOTrainer:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMRef)
                 llm_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.LLMRef], config=self.config.actor_rollout_ref, role="llm_ref")
                 self.resource_pool_to_cls[resource_pool]["llm_ref"] = llm_ref_cls
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.AudioEncoderRef)
+                audioencoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.AudioEncoderRef], config=self.config.actor_rollout_ref, role="audioencoder_ref")
+                self.resource_pool_to_cls[resource_pool]["audioencoder_ref"] = audioencoder_ref_cls
             else:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
                 ref_policy_cls = RayClassWithInitArgs(
@@ -855,6 +858,7 @@ class RayPPOTrainer:
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            print(class_dict)
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
@@ -872,7 +876,9 @@ class RayPPOTrainer:
             if self.disaggregate_ref:
                 self.ref_encoder_wg = all_wg["encoder_ref"]
                 self.ref_llm_wg = all_wg["llm_ref"]
+                self.ref_audioencoder_wg = all_wg["audioencoder_ref"]
                 self.ref_encoder_wg.init_model()
+                self.ref_audioencoder_wg.init_model()
                 self.ref_llm_wg.init_model()
             else:
                 self.ref_policy_wg = all_wg["ref"]
@@ -1238,6 +1244,14 @@ class RayPPOTrainer:
                                     "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
                                 }
                             )
+                    # from numpy.core.multiarray import _reconstruct
+                    # import numpy
+                    # from numpy import ndarray
+                    # from numpy.dtypes import ObjectDType
+                    # torch.serialization.add_safe_globals([DataProto, _reconstruct, ndarray, numpy.dtype, ObjectDType])
+                    # # torch.save(batch, "ref_debug.pt")
+                    # batch = torch.load("ref_debug.pt", map_location="cpu")
+                    # # breakpoint()
 
                     if self.use_reference_policy:
                         # compute reference log_prob
