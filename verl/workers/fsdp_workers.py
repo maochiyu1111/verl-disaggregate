@@ -1828,9 +1828,13 @@ class ActorRolloutRefWorker_llm(Worker):
             # 遇到报错，actor_module在meta，fsdp在cuda:0
             actor_module = actor_module.to_empty(device=torch.device("cuda", torch.cuda.current_device()), recurse=True)
             #lm_head_sd = torch.load("/workspace/models/qwen2.5vl-lm_head.pt")
-            llm_sd = torch.load("/workspace/yym/models/qwen2.5vl-3b-llm.pt")
+            if 'omni' in model_path.lower():
+                llm_sd = torch.load("/workspace/models/qwen2.5omni-3b-llm.pt")
+                actor_module.model.load_state_dict(llm_sd)
+            else:
+                llm_sd = torch.load("/workspace/models/qwen2.5vl-3b-llm.pt")
+                actor_module.language_model.load_state_dict(llm_sd)
             #actor_module.lm_head.load_state_dict(lm_head_sd)
-            actor_module.language_model.load_state_dict(llm_sd)
             # breakpoint()
 
             if use_remove_padding or self.ulysses_sequence_parallel_size > 1:

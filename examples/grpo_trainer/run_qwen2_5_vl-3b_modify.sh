@@ -6,8 +6,8 @@ export HYDRA_FULL_ERROR=1
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=/workspace/yym/datasets/RL/geo3k/train.parquet  \
-    data.val_files=/workspace/yym/datasets/RL/geo3k/test.parquet \
+    data.train_files=/workspace/data/geo3k/train.parquet  \
+    data.val_files=/workspace/data/geo3k/test.parquet \
     data.train_batch_size=16 \
     data.max_prompt_length=1024 \
     data.max_response_length=200 \
@@ -15,8 +15,8 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.image_key=images \
     actor_rollout_ref.model.path=/share/models/qwen2.5/qwen2.5-vl-3b \
-    +actor_rollout_ref.model.encoder.path=/workspace/yym/models/qwen2.5vl-3b-encoder \
-    +actor_rollout_ref.model.llm.path=/workspace/yym/models/qwen2.5vl-3b-llm \
+    +actor_rollout_ref.model.encoder.path=/workspace/models/qwen2.5vl-3b-encoder \
+    +actor_rollout_ref.model.llm.path=/workspace/models/qwen2.5vl-3b-llm \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=4 \
@@ -29,7 +29,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     +actor_rollout_ref.rollout.encoder.name=hf \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
