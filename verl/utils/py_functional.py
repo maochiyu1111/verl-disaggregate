@@ -180,6 +180,31 @@ def append_to_dict(data: dict, new_data: dict):
             data[key] = []
         data[key].append(val)
 
+def dict_split(data: dict, split_size: int):
+    """data split for micro_batch
+        equals to micro_batches = data.split(micro_batch_size) for DataProto
+    """
+    micro_batches = []
+    
+    total_length = len(next(iter(data.values())))
+    for i in range(0, total_length, split_size):
+        micro_batch = {key: values[i : i + split_size] for key, values in data.items()}
+        micro_batches.append(micro_batch)
+    return micro_batches
+
+def dict_to(data_dict, device) -> dict:
+    """
+    move all the item in dict to indicated device
+    only suitable for the case that this:
+    {key:[tensor, tensor, ... , tensor]}
+    """
+    new_dict = {}
+    
+    for key, value in data_dict.items():
+        new_list = [item if item is None else item.to(device, non_blocking=True) for item in value]
+        new_dict[key] = new_list
+            
+    return new_dict
 
 class NestedNamespace(SimpleNamespace):
     """A nested version of SimpleNamespace that recursively converts dictionaries to namespaces.

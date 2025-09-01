@@ -343,20 +343,21 @@ def is_transformers_version_in_range(min_version: Optional[str] = None, max_vers
 
 
 def apply_monkey_patch_encoder():
-    from verl.models.transformers.qwen2_5_vl import encoder_forward
+    # from verl.models.transformers.qwen2_5_vl import encoder_forward
     from verl.models.transformers.qwen2_5_omni import feature_extractor_forward
-    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
+    # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
     from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniVisionEncoder,Qwen2_5OmniAudioEncoder
-    Qwen2_5_VisionTransformerPretrainedModel.encoder_forward = encoder_forward
+    # Qwen2_5_VisionTransformerPretrainedModel.encoder_forward = encoder_forward
+    pass
     Qwen2_5OmniAudioEncoder.encoder_forward = feature_extractor_forward
     Qwen2_5OmniVisionEncoder.encoder_forward = encoder_forward
     print("Monkey patch encoder_forward in Qwen2.5VL and Qwen2.5Omni")
 
 def apply_monkey_patch_llm():
-    from verl.models.transformers.qwen2_5_vl import llm_forward
+    # from verl.models.transformers.qwen2_5_vl import llm_forward
     from verl.models.transformers.qwen2_5_omni import llm_forward as omni_llm_forward
-    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
+    # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
     from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniThinkerTextModel
-    Qwen2_5_VLModel.llm_forward = llm_forward
+    # Qwen2_5_VLModel.llm_forward = llm_forward
     Qwen2_5OmniThinkerTextModel.llm_forward = omni_llm_forward
-    
+    pass

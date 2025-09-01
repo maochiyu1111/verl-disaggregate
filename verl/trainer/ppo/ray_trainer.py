@@ -77,9 +77,9 @@ class Role(Enum):
     RewardModel = 5
     ActorRolloutRef = 6
     EncoderRef = 7
-    EncoderActor = 8
+    EncoderActorRollout = 8
     LLMRef = 9
-    LLMActor = 10
+    LLMActorRollout = 10
     AudioEncoderRef = 11
     AudioEncoderActor = 12
 
@@ -354,14 +354,14 @@ class RayPPOTrainer:
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
         if self.hybrid_engine:
-            assert Role.ActorRollout in role_worker_mapping, f"{role_worker_mapping.keys()=}"
+            assert Role.ActorRollout in role_worker_mapping or Role.EncoderActorRollout in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping or Role.EncoderRef in role_worker_mapping or Role.AudioEncoderRef in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.disaggregate_ref = Role.EncoderRef in role_worker_mapping or Role.AudioEncoderRef in role_worker_mapping
-        self.disaggregate_actor = Role.EncoderActor in role_worker_mapping or Role.AudioEncoderActor in role_worker_mapping
+        self.disaggregate_actor_rollout = Role.EncoderActorRollout in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -790,14 +790,33 @@ class RayPPOTrainer:
 
         # create actor and rollout
         if self.hybrid_engine:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
-            actor_rollout_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.ActorRollout],
-                config=self.config.actor_rollout_ref,
-                role="actor_rollout",
-                profile_option=self.config.trainer.npu_profile.options,
-            )
-            self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
+            if self.disaggregate_actor_rollout:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.EncoderActorRollout)
+                encoder_ref_cls =  RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.EncoderActorRollout],
+                    config=self.config.actor_rollout_ref,
+                    role="encoder_actor_rollout",
+                    # profile_option=self.config.trainer.npu_profile.options,
+                )
+                self.resource_pool_to_cls[resource_pool]["encoder_actor_rollout"] = encoder_ref_cls
+                
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMActorRollout)
+                llm_ref_cls =  RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.LLMActorRollout],
+                    config=self.config.actor_rollout_ref,
+                    role="llm_actor_rollout",
+                    # profile_option=self.config.trainer.npu_profile.options,
+                )
+                self.resource_pool_to_cls[resource_pool]["llm_actor_rollout"] = llm_ref_cls                
+            else:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
+                actor_rollout_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.ActorRollout],
+                    config=self.config.actor_rollout_ref,
+                    role="actor_rollout",
+                    profile_option=self.config.trainer.npu_profile.options,
+                )
+                self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
         else:
             raise NotImplementedError
 
@@ -889,8 +908,14 @@ class RayPPOTrainer:
             self.rm_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg["actor_rollout"]
-        self.actor_rollout_wg.init_model()
+        if self.disaggregate_actor_rollout:
+            self.actor_rollout_encoder_wg = all_wg["encoder_actor_rollout"]
+            self.actor_rollout_llm_wg = all_wg["llm_actor_rollout"]
+            self.actor_rollout_encoder_wg.init_model()
+            self.actor_rollout_llm_wg.init_model()
+        else:
+            self.actor_rollout_wg = all_wg["actor_rollout"]
+            self.actor_rollout_wg.init_model()
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -1045,7 +1070,10 @@ class RayPPOTrainer:
         attention_mask = batch.batch["attention_mask"]
         batch_size = attention_mask.shape[0]
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1).tolist()  # (train_batch_size,)
-        world_size = self.actor_rollout_wg.world_size
+        if self.disaggregate_actor_rollout:
+            world_size = self.actor_rollout_llm_wg.world_size
+        else:
+            world_size = self.actor_rollout_wg.world_size
         global_partition_lst = get_seqlen_balanced_partitions(
             global_seqlen_lst, k_partitions=world_size, equal_size=True
         )
@@ -1082,13 +1110,13 @@ class RayPPOTrainer:
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-            val_metrics = self._validate()
-            assert val_metrics, f"{val_metrics=}"
-            pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
-            if self.config.trainer.get("val_only", False):
-                return
+        # if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        #     val_metrics = self._validate()
+        #     assert val_metrics, f"{val_metrics=}"
+        #     pprint(f"Initial validation metrics: {val_metrics}")
+        #     logger.log(data=val_metrics, step=self.global_steps)
+        #     if self.config.trainer.get("val_only", False):
+        #         return
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -1136,6 +1164,11 @@ class RayPPOTrainer:
                 if "agent_name" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("agent_name")
 
+                if self.disaggregate_actor_rollout:
+                    modality_dict = {"multi_modal_inputs": batch.non_tensor_batch["multi_modal_inputs"]}
+                    modality_batch = DataProto.from_dict(non_tensors=modality_dict)
+                    modality_batch = modality_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
@@ -1148,10 +1181,15 @@ class RayPPOTrainer:
                 is_last_step = self.global_steps >= self.total_training_steps
 
                 with marked_timer("step", timing_raw):
-                    # generate a batch
+                    # # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
                         if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                            if self.disaggregate_actor_rollout:
+                                modality_embeddings = self.actor_rollout_encoder_wg.rollout_forward(modality_batch)
+                                gen_batch.non_tensor_batch["multi_modal_data"] = modality_embeddings.non_tensor_batch["multi_modal_data"]
+                                gen_batch_output = self.actor_rollout_llm_wg.generate_sequences(gen_batch)
+                            else:
+                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
@@ -1210,8 +1248,14 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
                     # recompute old_log_probs
+                    
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        # old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        encoder_results = self.actor_rollout_encoder_wg.compute_log_prob_encoder(batch)
+                        batch = batch.union_non_tensor(encoder_results)
+                        old_log_prob = self.actor_rollout_llm_wg.compute_log_prob_llm(batch)
+                        for key in encoder_results.non_tensor_batch.keys():
+                            batch.non_tensor_batch.pop(key)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1259,9 +1303,6 @@ class RayPPOTrainer:
                             if not self.ref_in_actor:
                                 if self.disaggregate_ref:
                                     encoder_results = self.ref_encoder_wg.compute_ref_log_prob_encoder(batch)
-                                    # image_embed = encoder_results.batch["image_embed"]
-                                    # video_embed = encoder_results.batch["video_embed"]
-                                    # union encoder embed
                                     batch = batch.union_non_tensor(encoder_results)
                                     ref_log_prob = self.ref_llm_wg.compute_ref_log_prob_llm(batch)
                                 else:
@@ -1269,6 +1310,8 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                            for key in encoder_results.non_tensor_batch.keys():
+                                batch.non_tensor_batch.pop(key)
 
                     # compute values
                     if self.use_critic:
@@ -1317,13 +1360,19 @@ class RayPPOTrainer:
                             critic_output = self.critic_wg.update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
-
+                    
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                            # actor_output = self.actor_rollout_wg.update_actor(batch)
+                            encoder_embed = self.actor_rollout_encoder_wg.actor_forward(batch)
+                            batch = batch.union_non_tensor(encoder_embed)
+                            actor_output = self.actor_rollout_llm_wg.update_actor(batch)
+                            encoder_input = batch.pop(non_tensor_batch_keys=["multi_modal_inputs"])
+                            # expecting None to be DataProto, but got <class 'NoneType'>
+                            actor_output = self.actor_rollout_encoder_wg.update_actor(actor_output, encoder_input)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

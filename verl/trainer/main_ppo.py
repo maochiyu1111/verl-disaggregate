@@ -153,31 +153,43 @@ class TaskRunner:
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
         # Map roles to their corresponding remote worker classes.
+        # role_worker_mapping = {
+        #     Role.ActorRollout: ray.remote(actor_rollout_cls),
+        #     Role.Critic: ray.remote(CriticWorker),
+        # }
+        from verl.workers.fsdp_workers import ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
         role_worker_mapping = {
-            Role.ActorRollout: ray.remote(actor_rollout_cls),
+            Role.LLMActorRollout: ray.remote(ActorRolloutRefWorker_llm),
+            Role.EncoderActorRollout: ray.remote(ActorRolloutRefWorker_encoder),
             Role.Critic: ray.remote(CriticWorker),
         }
 
         # Define the resource pool specification.
         # Map roles to the resource pool.
         # global_pool_id = "global_pool"
-        actor_rollout_id = "actor_rollout_pool"
-        ref_id = "ref_pool"
-        ref_dis_id = "ref_dis_pool"
+        actor_rollout_encoder_id = "actor_rollout_encoder_pool"
+        actor_rollout_llm_id = "actor_rollout_llm_pool"
+        ref_encoder_id = "ref_encoder_pool"
+        ref_llm_id = "ref_llm_pool"
 
         # resource_pool_spec = {
         #     global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         # }
 
         resource_pool_spec = {
-            actor_rollout_id: [2],
-            ref_id: [1],
-            ref_dis_id: [1],
+            actor_rollout_encoder_id: [2],
+            actor_rollout_llm_id: [4],
+            ref_encoder_id: [1],
+            ref_llm_id: [1]
         }
-
+        # mapping = {
+        #     Role.ActorRollout: actor_rollout_id,
+        #     Role.Critic: actor_rollout_id,
+        # }
         mapping = {
-            Role.ActorRollout: actor_rollout_id,
-            Role.Critic: actor_rollout_id,
+            Role.LLMActorRollout: actor_rollout_llm_id,
+            Role.EncoderActorRollout: actor_rollout_encoder_id,
+            Role.Critic: actor_rollout_llm_id,
         }
 
         # We should adopt a multi-source reward function here:
@@ -194,20 +206,19 @@ class TaskRunner:
             else:
                 raise NotImplementedError
             role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
-            mapping[Role.RewardModel] = actor_rollout_id
+            mapping[Role.RewardModel] = actor_rollout_llm_id
 
         # Add a reference policy worker if KL loss or KL reward is used.
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
             # role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             # mapping[Role.RefPolicy] = ref_id
             role_worker_mapping[Role.EncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
             role_worker_mapping[Role.LLMRef] = ray.remote(ActorRolloutRefWorker_llm)
-            # Audio encoder using the same class as LLMRef for simplicity
-            mapping[Role.EncoderRef] = ref_dis_id
-            mapping[Role.LLMRef] = ref_id
             role_worker_mapping[Role.AudioEncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
-            mapping[Role.AudioEncoderRef] = ref_dis_id
+            mapping[Role.AudioEncoderRef] = ref_encoder_id
+            mapping[Role.EncoderRef] = ref_encoder_id
+            mapping[Role.LLMRef] = ref_llm_id
+
         # Load the reward manager for training and validation.
         reward_fn = load_reward_manager(
             config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})

@@ -164,6 +164,8 @@ class vLLMRollout(BaseRollout):
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
         if "omni" in model_path.lower():
             engine_kwargs["limit_mm_per_prompt"] = {"audio": 1, "image": 1}
+        # engine_kwargs["skip_mm_profiling"] = True
+
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=config.free_cache_engine,
