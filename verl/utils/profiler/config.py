@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
 
+from typing import Optional
 
 @dataclass
 class ProfilerConfig(BaseConfig):
@@ -33,6 +34,11 @@ class ProfilerConfig(BaseConfig):
     discrete: bool = False
     all_ranks: bool = False
     ranks: list[int] = field(default_factory=list)
+
+    step_start: int = 0
+    step_end: int = 1
+
+    save_path: Optional[str] = None
 
     def union(self, other: "ProfilerConfig") -> "ProfilerConfig":
         return ProfilerConfig(

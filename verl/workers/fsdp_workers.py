@@ -70,7 +70,7 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, log_gpu_memory_usage, simple_timer
+from verl.utils.profiler import Profiler, DistProfiler, DistProfilerExtension, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing
 from verl.utils.py_functional import convert_to_regular_types, dict_to
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig
@@ -127,6 +127,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
 
+        self._prof = None
+        self._prof_enabled = False
+        self._prof_active = False
+        self._prof_logdir = os.getenv("PROF_LOGDIR", "/workspace/yym/RLHF/verl-disaggregate/log/trace/col")
+        self._enable_prof_env = bool(int(os.getenv("ENABLE_PROFILER", "0")))
+
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
         # TODO(sgm): support FSDP hybrid shard for larger model
@@ -159,8 +165,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # as they provides DictConfig-like interface
         # The benefit of creating the dataclass config is to perform validation during __post_init__
         profiler_config = omega_conf_to_dataclass(config.get("profiler"))
+        # DistProfilerExtension.__init__(
+        #     self, DistProfiler(rank=self.rank, config=profiler_config, option=self.profile_option)
+        # )
         DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=profiler_config, option=self.profile_option)
+            self, Profiler(config=profiler_config, task=self.role)
         )
 
         self._is_offload_param = False
@@ -561,6 +570,50 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return rollout, rollout_sharding_manager
 
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_start(self, wait=3, warmup=1, active=1, repeat=1):
+        if self.rank != 0:
+            return
+        print(f"prof start rank{self.rank}!")
+        if not self._enable_prof_env or self._prof_active:
+            return
+        subdir = f"{self.role}_rank{self.rank}_local{self._local_rank}"
+        outdir = os.path.join(self._prof_logdir, subdir)
+        os.makedirs(outdir, exist_ok=True)
+        self._prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=repeat),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(outdir),
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,
+            with_modules=False,
+        )
+        self._prof.__enter__()
+        self._prof_enabled = True
+        self._prof_active  = True
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_step(self):
+        if self.rank != 0:
+            return
+        print(f"prof step rank{self.rank}!")
+        if self._prof_enabled and self._prof is not None:
+            self._prof.step()
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_stop(self):
+        if self.rank != 0:
+            return
+        print(f"prof stop rank{self.rank}!")
+        save_file_name = f"/prof_{self.role}_rank_{self.rank}.json"
+        self._prof.export_chrome_trace(self._prof_logdir + save_file_name)
+        if self._prof_enabled and self._prof is not None:
+            self._prof.__exit__(None, None, None)
+        self._prof = None
+        self._prof_enabled = False
+        self._prof_active  = False
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         from verl.workers.actor import DataParallelPPOActor
@@ -668,7 +721,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="red", role="actor_update")
+    #@DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):
         # Support all hardwares
         data = data.to(get_device_id())
@@ -714,7 +767,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="red", role="rollout_generate")
+    #@DistProfiler.annotate(color="red", role="rollout_generate")
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
         prompts = prompts.to(get_device_id())
@@ -754,7 +807,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+    #@DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     def compute_log_prob(self, data: DataProto):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
@@ -798,7 +851,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
+    #@DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: DataProto):
         if self._is_lora:
             # if _is_lora, actor without lora applied is the ref
@@ -912,7 +965,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """Stop profiling for the current rank in the current training step."""
         self.profiler.stop()
 
-class ActorRolloutRefWorker_encoder(Worker):
+class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
     or a hybrid engine based on the config.rollout
@@ -934,6 +987,12 @@ class ActorRolloutRefWorker_encoder(Worker):
                 world_size=world_size,
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
+
+        self._prof = None
+        self._prof_enabled = False
+        self._prof_active = False
+        self._prof_logdir = os.getenv("PROF_LOGDIR", "/workspace/yym/RLHF/verl-disaggregate/log/trace/col")
+        self._enable_prof_env = bool(int(os.getenv("ENABLE_PROFILER", "0")))
 
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
@@ -959,7 +1018,7 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         profiler_config = omega_conf_to_dataclass(config.get("profiler"))
         DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=profiler_config, option=self.profile_option)
+            self, Profiler(config=profiler_config, task=self.role)
         )
         
         self._is_offload_param = False
@@ -1321,6 +1380,50 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         return rollout, rollout_sharding_manager
 
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_start(self, wait=3, warmup=1, active=1, repeat=1):
+        if self.rank != 0:
+            return
+        print(f"prof start rank{self.rank}!")
+        if not self._enable_prof_env or self._prof_active:
+            return
+        subdir = f"{self.role}_rank{self.rank}_local{self._local_rank}"
+        outdir = os.path.join(self._prof_logdir, subdir)
+        os.makedirs(outdir, exist_ok=True)
+        self._prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=repeat),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(outdir),
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,
+            with_modules=False,
+        )
+        self._prof.__enter__()
+        self._prof_enabled = True
+        self._prof_active  = True
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_step(self):
+        if self.rank != 0:
+            return
+        print(f"prof step rank{self.rank}!")
+        if self._prof_enabled and self._prof is not None:
+            self._prof.step()
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_stop(self):
+        if self.rank != 0:
+            return
+        print(f"prof stop rank{self.rank}!")
+        save_file_name = f"/prof_{self.role}_rank_{self.rank}.json"
+        self._prof.export_chrome_trace(self._prof_logdir + save_file_name)
+        if self._prof_enabled and self._prof is not None:
+            self._prof.__exit__(None, None, None)
+        self._prof = None
+        self._prof_enabled = False
+        self._prof_active  = False
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         from verl.workers.encoder import DataParallelPPOEncoder 
@@ -1504,7 +1607,7 @@ class ActorRolloutRefWorker_encoder(Worker):
                 raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
             #dist_log(f'img_grid_thw: {len(data.non_tensor_batch["multi_modal_data"])}, img_embd: {len(image_embed)}')
             vllm_input = []
-            print(f'DEBUG: {len(image_embed)} {len(data.non_tensor_batch["multi_modal_inputs"])}')
+            #print(f'DEBUG: {len(image_embed)} {len(data.non_tensor_batch["multi_modal_inputs"])}')
             for embd, grid in zip(image_embed,data.non_tensor_batch["multi_modal_inputs"]):
                 vllm_input.append({"image": {"image_embeds": embd, "image_grid_thw": grid["image_grid_thw"]}})
             output = DataProto.from_dict(non_tensors={"multi_modal_data":vllm_input})
@@ -1558,7 +1661,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             output = DataProto.from_dict(non_tensors=embeds)
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
-        print(f'DEBUG: compute_log_prob_encoder: {len(output.non_tensor_batch["image_embed"])}')
+        #print(f'DEBUG: compute_log_prob_encoder: {len(output.non_tensor_batch["image_embed"])}')
 
         output = output.to("cpu")
 
@@ -1641,7 +1744,7 @@ class ActorRolloutRefWorker_encoder(Worker):
             
             
 
-class ActorRolloutRefWorker_llm(Worker):
+class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
     or a hybrid engine based on the config.rollout
@@ -1654,6 +1757,12 @@ class ActorRolloutRefWorker_llm(Worker):
 
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group()
+
+        self._prof = None
+        self._prof_enabled = False
+        self._prof_active = False
+        self._prof_logdir = os.getenv("PROF_LOGDIR", "/workspace/yym/RLHF/verl-disaggregate/log/trace/col")
+        self._enable_prof_env = bool(int(os.getenv("ENABLE_PROFILER", "0")))
 
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
@@ -1676,6 +1785,11 @@ class ActorRolloutRefWorker_llm(Worker):
         self._is_actor = self.role == "llm_actor_rollout"
         self._is_rollout = self.role == "llm_actor_rollout"
         self._is_ref = self.role == "llm_ref"
+
+        profiler_config = omega_conf_to_dataclass(config.get("profiler"))
+        DistProfilerExtension.__init__(
+            self, Profiler(config=profiler_config, task=self.role)
+        )
 
         self._is_offload_param = False
         self._is_offload_optimizer = False
@@ -2030,6 +2144,50 @@ class ActorRolloutRefWorker_llm(Worker):
             raise NotImplementedError(f"Rollout name: {self.config.rollout.name} is not supported")
 
         return rollout, rollout_sharding_manager
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_start(self, wait=3, warmup=1, active=1, repeat=1):
+        if self.rank != 0:
+            return
+        print(f"prof start rank{self.rank}!")
+        if not self._enable_prof_env or self._prof_active:
+            return
+        subdir = f"{self.role}_rank{self.rank}_local{self._local_rank}"
+        outdir = os.path.join(self._prof_logdir, subdir)
+        os.makedirs(outdir, exist_ok=True)
+        self._prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=repeat),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(outdir),
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,
+            with_modules=False,
+        )
+        self._prof.__enter__()
+        self._prof_enabled = True
+        self._prof_active  = True
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_step(self):
+        if self.rank != 0:
+            return
+        print(f"prof step rank{self.rank}!")
+        if self._prof_enabled and self._prof is not None:
+            self._prof.step()
+
+    @register(dispatch_mode=Dispatch.ALL_TO_ALL)
+    def prof_stop(self):
+        if self.rank != 0:
+            return
+        print(f"prof stop rank{self.rank}!")
+        save_file_name = f"/prof_{self.role}_rank_{self.rank}.json"
+        self._prof.export_chrome_trace(self._prof_logdir + save_file_name)
+        if self._prof_enabled and self._prof is not None:
+            self._prof.__exit__(None, None, None)
+        self._prof = None
+        self._prof_enabled = False
+        self._prof_active  = False
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
@@ -2575,7 +2733,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="cyan")
+    #@DistProfiler.annotate(color="cyan")
     def compute_values(self, data: DataProto):
         # Support all hardwares
         data = data.to(get_device_id())
@@ -2599,7 +2757,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="pink")
+    #@DistProfiler.annotate(color="pink")
     def update_critic(self, data: DataProto):
         # Support all hardwares
         data = data.to(get_device_id())
@@ -2954,7 +3112,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         return DataProto.from_dict(rm_inputs)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    @DistProfiler.annotate(color="brown")
+    #@DistProfiler.annotate(color="brown")
     def compute_rm_score(self, data: DataProto):
         import itertools
 

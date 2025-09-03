@@ -686,11 +686,18 @@ class RayPPOTrainer:
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
-            size_divisor = (
-                self.actor_rollout_wg.world_size
-                if not self.async_rollout_mode
-                else self.config.actor_rollout_ref.rollout.agent.num_workers
-            )
+            if self.disaggregate_actor_rollout:
+                size_divisor = (
+                    self.actor_rollout_llm_wg.world_size
+                    if not self.async_rollout_mode
+                    else self.config.actor_rollout_ref_llm_wg.rollout.agent.num_workers
+                )
+            else:
+                size_divisor = (
+                    self.actor_rollout_wg.world_size
+                    if not self.async_rollout_mode
+                    else self.config.actor_rollout_ref.rollout.agent.num_workers
+                )
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
             if not self.async_rollout_mode:
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
@@ -1038,9 +1045,19 @@ class RayPPOTrainer:
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         if do_profile:
-            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            if self.disaggregate_actor_rollout:
+                self.actor_rollout_encoder_wg.start_profile()
+                self.actor_rollout_llm_wg.start_profile()
+            else:
+                #self.actor_rollout_wg.start_profile()
+                self.actor_rollout_wg.prof_start()
             if self.use_reference_policy:
-                self.ref_policy_wg.start_profile()
+                if self.disaggregate_ref:
+                    self.ref_encoder_wg.start_profile()
+                    self.ref_llm_wg.start_profile()
+                else:
+                    #self.ref_policy_wg.start_profile()
+                    pass
             if self.use_critic:
                 self.critic_wg.start_profile()
             if self.use_rm:
@@ -1049,13 +1066,95 @@ class RayPPOTrainer:
     def _stop_profiling(self, do_profile: bool) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
         if do_profile:
-            self.actor_rollout_wg.stop_profile()
+            if self.disaggregate_actor_rollout:
+                self.actor_rollout_encoder_wg.stop_profile()
+                self.actor_rollout_llm_wg.stop_profile()
+            else:
+                self.actor_rollout_wg.prof_stop()
             if self.use_reference_policy:
-                self.ref_policy_wg.stop_profile()
+                if self.disaggregate_ref:
+                    self.ref_encoder_wg.stop_profile()
+                    self.ref_llm_wg.stop_profile()
+                else:
+                    #self.ref_policy_wg.stop_and_save()
+                    pass
             if self.use_critic:
                 self.critic_wg.stop_profile()
             if self.use_rm:
                 self.rm_wg.stop_profile()
+
+    def _step_profiling(self, do_profile: bool) -> None:
+        if do_profile:
+            if self.disaggregate_actor_rollout:
+                self.actor_rollout_encoder_wg.step_profile()
+                self.actor_rollout_llm_wg.step_profile()
+            else:
+                self.actor_rollout_wg.prof_step()
+            if self.use_reference_policy:
+                if self.disaggregate_ref:
+                    self.ref_encoder_wg.step_profile()
+                    self.ref_llm_wg.step_profile()
+                else:
+                    #self.ref_policy_wg.stop_and_save()
+                    pass
+            if self.use_critic:
+                self.critic_wg.step_profile()
+            if self.use_rm:
+                self.rm_wg.step_profile()
+
+    def _prof_start(self):
+        if self.disaggregate_actor_rollout:
+            self.actor_rollout_encoder_wg.prof_start()
+            self.actor_rollout_llm_wg.prof_start()
+        else:
+            self.actor_rollout_wg.prof_start()
+        if self.use_reference_policy:
+            if self.disaggregate_ref:
+                self.ref_encoder_wg.prof_start()
+                self.ref_llm_wg.prof_start()
+            else:
+                # self.ref_policy_wg.prof_start()
+                pass
+        if self.use_critic:
+            self.critic_wg.prof_start()
+        if self.use_rm:
+            self.rm_wg.prof_start()
+
+    def _prof_step(self):
+        if self.disaggregate_actor_rollout:
+            self.actor_rollout_encoder_wg.prof_step()
+            self.actor_rollout_llm_wg.prof_step()
+        else:
+            self.actor_rollout_wg.prof_step()
+        if self.use_reference_policy:
+            if self.disaggregate_ref:
+                self.ref_encoder_wg.prof_step()
+                self.ref_llm_wg.prof_step()
+            else:
+                # self.ref_policy_wg.prof_step()
+                pass
+        if self.use_critic:
+            self.critic_wg.prof_step()
+        if self.use_rm:
+            self.rm_wg.prof_step()
+
+    def _prof_stop(self):
+        if self.disaggregate_actor_rollout:
+            self.actor_rollout_encoder_wg.prof_stop()
+            self.actor_rollout_llm_wg.prof_stop()
+        else:
+            self.actor_rollout_wg.prof_stop()
+        if self.use_reference_policy:
+            if self.disaggregate_ref:
+                self.ref_encoder_wg.prof_stop()
+                self.ref_llm_wg.prof_stop()
+            else:
+                # self.ref_policy_wg.prof_stop()
+                pass
+        if self.use_critic:
+            self.critic_wg.prof_stop()
+        if self.use_rm:
+            self.rm_wg.prof_stop()
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
@@ -1127,6 +1226,10 @@ class RayPPOTrainer:
         next_step_profile = False
 
         for epoch in range(self.config.trainer.total_epochs):
+            
+            self._prof_start()
+            #self.actor_rollout_wg.prof_start()
+
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
@@ -1240,14 +1343,16 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
                     # recompute old_log_probs
-                    
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         # old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        encoder_results = self.actor_rollout_encoder_wg.compute_log_prob_encoder(batch)
-                        batch = batch.union_non_tensor(encoder_results)
-                        old_log_prob = self.actor_rollout_llm_wg.compute_log_prob_llm(batch)
-                        for key in encoder_results.non_tensor_batch.keys():
-                            batch.non_tensor_batch.pop(key)
+                        if self.disaggregate_actor_rollout:
+                            encoder_results = self.actor_rollout_encoder_wg.compute_log_prob_encoder(batch)
+                            batch = batch.union_non_tensor(encoder_results)
+                            old_log_prob = self.actor_rollout_llm_wg.compute_log_prob_llm(batch)
+                            for key in encoder_results.non_tensor_batch.keys():
+                                batch.non_tensor_batch.pop(key)
+                        else:
+                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1294,8 +1399,10 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
-                            for key in encoder_results.non_tensor_batch.keys():
-                                batch.non_tensor_batch.pop(key)
+
+                            if self.disaggregate_ref:
+                                for key in encoder_results.non_tensor_batch.keys():
+                                    batch.non_tensor_batch.pop(key)
 
                     # compute values
                     if self.use_critic:
@@ -1350,13 +1457,16 @@ class RayPPOTrainer:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            # actor_output = self.actor_rollout_wg.update_actor(batch)
-                            encoder_embed = self.actor_rollout_encoder_wg.actor_forward(batch)
-                            batch = batch.union_non_tensor(encoder_embed)
-                            actor_output = self.actor_rollout_llm_wg.update_actor(batch)
-                            encoder_input = batch.pop(non_tensor_batch_keys=["multi_modal_inputs"])
-                            # expecting None to be DataProto, but got <class 'NoneType'>
-                            actor_output = self.actor_rollout_encoder_wg.update_actor(actor_output, encoder_input)
+                            if self.disaggregate_actor_rollout:
+                            
+                                encoder_embed = self.actor_rollout_encoder_wg.actor_forward(batch)
+                                batch = batch.union_non_tensor(encoder_embed)
+                                actor_output = self.actor_rollout_llm_wg.update_actor(batch)
+                                encoder_input = batch.pop(non_tensor_batch_keys=["multi_modal_inputs"])
+                                actor_output = self.actor_rollout_encoder_wg.update_actor(actor_output, encoder_input)
+                            else:
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
+                            # expecting None to be DataProto, but got <class 'NoneType'>                
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
@@ -1380,6 +1490,8 @@ class RayPPOTrainer:
                                 dump_path=rollout_data_dir,
                             )
 
+                    self._prof_step()
+                    #self.actor_rollout_wg.prof_step()
                     # validate
                     if (
                         self.val_reward_fn is not None
@@ -1413,7 +1525,7 @@ class RayPPOTrainer:
                             print("Force saving checkpoint: ESI instance expiration approaching.")
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
-
+                
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
                         self.global_steps + 1 in self.config.trainer.profile_steps
@@ -1456,6 +1568,8 @@ class RayPPOTrainer:
                 self.global_steps += 1
 
                 if is_last_step:
+                    self._prof_stop()
+                    #self.actor_rollout_wg.prof_stop()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return

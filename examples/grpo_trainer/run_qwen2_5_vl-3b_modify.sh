@@ -4,6 +4,19 @@ ENGINE=${1:-vllm}
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 export HYDRA_FULL_ERROR=1
 
+PROF_ARGS=(
+    actor_rollout_ref.profiler.ranks=[0] 
+    +actor_rollout_ref.profiler.step_start=2
+    +actor_rollout_ref.profiler.step_end=3 
+    +actor_rollout_ref.profiler.save_path=/workspace/yym/RLHF/verl-disaggregate/log/trace/col 
+    trainer.profile_steps=[1,2,3,4] 
+    trainer.profile_continuous_steps=True 
+)
+
+export ENABLE_PROFILER=1
+export PROF_LOGDIR="/workspace/yym/RLHF/verl-disaggregate/log/trace/col"
+export TASK_PLACEMENT="colocated"
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=/workspace/yym/datasets/RL/geo3k/train.parquet  \
@@ -19,7 +32,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.model.llm.path=/workspace/yym/models/qwen2.5vl-3b-llm \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
@@ -32,13 +45,13 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     +actor_rollout_ref.rollout.encoder.name=hf \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
-    actor_rollout_ref.rollout.n=5 \
+    actor_rollout_ref.rollout.n=1 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console'] \
@@ -47,5 +60,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
-    trainer.test_freq=10 \
-    trainer.total_epochs=2 2>&1 | tee log/qwen2_5vl-3b.log
+    trainer.test_freq=100 \
+    trainer.total_epochs=2 \
+    2>&1 | tee log/col-qwen2_5vl-3b.log

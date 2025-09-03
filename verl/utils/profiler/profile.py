@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import os
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import torch
 import torch.distributed
@@ -39,7 +39,7 @@ class Profiler:
         config: Configuration object containing profiling parameters
     """
 
-    def __init__(self, config):
+    def __init__(self, config, task=""):
         # note : if we do not set use_profile, it will be set as None, so that all function will be skip
         if not isinstance(config, DictConfig):
             config = OmegaConf.create(config)
@@ -48,9 +48,10 @@ class Profiler:
         self.saved = False
         self.prof = None
         self.rank = torch.distributed.get_rank()
+        self.task = task
         # we need to validate the config before using the profiler
         self._validate()
-        if config.use_profile and self.rank in self.config.profile_ranks:
+        if self.rank in self.config.ranks:
             print(f"[Profiler] Profiler init for rank {self.rank}")
 
             self.prof = torch.profiler.profile(
@@ -64,28 +65,30 @@ class Profiler:
                     active=self.config.step_end - self.config.step_start,
                     repeat=1,
                 ),
-                record_shapes=True,
-                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(config.save_path),
+                record_shapes=False,
+                with_stack=False,
             )
 
+        #self.save_path = config.save_path
+
     def _validate(self):
-        if self.config.use_profile:
-            if self.config.profile_ranks is None:
-                print("[WARNING] Profile ranks is not set, default to rank 0")
-                self.config.profile_ranks = [0]
-            assert self.config.step_start >= 0, "[ERROR] Profile step start must be greater than 0"
-            assert self.config.step_end >= 0, "[ERROR] Profile step end must be greater than 0"
-            assert self.config.step_start < self.config.step_end, (
-                "[ERROR] Profile step start must be less than step end"
-            )
+        if self.config.ranks is None:
+            print("[WARNING] Profile ranks is not set, default to rank 0")
+            self.config.ranks = [0]
+        assert self.config.step_start >= 0, "[ERROR] Profile step start must be greater than 0"
+        assert self.config.step_end >= 0, "[ERROR] Profile step end must be greater than 0"
+        assert self.config.step_start < self.config.step_end, (
+            "[ERROR] Profile step start must be less than step end"
+        )
 
     def check(self):
         return self.prof is not None and not self.skip_prof
 
     def start(self):
         if self.check():
-            print(f"[Profiler] started for rank {self.rank}")
             self.prof.start()
+            print(f"[Profiler] ({self.task}) started for rank {self.rank}")
 
     def step(self):
         if self.check():
@@ -93,16 +96,16 @@ class Profiler:
 
     def stop(self):
         if self.check():
-            print(f"[Profiler] stopped for rank {self.rank}")
             self.prof.stop()
-
+            print(f"[Profiler] ({self.task}) stopped for rank {self.rank}")
+            
     def save(self):
         if self.prof is not None and not self.saved:
-            if not os.path.exists(self.config.save_path):
-                os.makedirs(self.config.save_path)
-            save_file_name = f"/prof_start_{self.config.step_start}_end_{self.config.step_end}_rank_{self.rank}.json"
-            print(f"[Profiler] Saving trace to {self.config.save_path + save_file_name}")
-            self.prof.export_chrome_trace(self.config.save_path + save_file_name)
+            if not os.path.exists(self.save_path):
+                os.makedirs(self.save_path)
+            save_file_name = f"/prof_{self.task}_rank_{self.rank}.json"
+            print(f"[Profiler] Saving trace to {self.save_path + save_file_name}")
+            self.prof.export_chrome_trace(self.save_path + save_file_name)
             self.skip_prof = True
             self.saved = True
 
@@ -110,7 +113,7 @@ class Profiler:
         if self.check():
             self.stop()
             self.save()
-
+            
     def stop_trace(self):
         if self.check():
             print(f"[Profiler] Trace stopped for rank {self.rank}")
@@ -214,7 +217,7 @@ class DistProfilerExtension:
         profiler (DistProfiler): The base distributed profiler instance to extend
     """
 
-    def __init__(self, profiler: DistProfiler):
+    def __init__(self, profiler: Union[Profiler, DistProfiler]):
         self.profiler = profiler
 
     from verl.single_controller.base.decorator import Dispatch, register
@@ -228,3 +231,11 @@ class DistProfilerExtension:
     def stop_profile(self) -> None:
         """Stop profiling for the current rank in the current training step."""
         self.profiler.stop()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def step_profile(self) -> None:
+        self.profiler.step()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def stop_and_save(self) -> None:
+        self.profiler.stop_and_save()
