@@ -11,6 +11,13 @@ def vllm_monkey_patch_llm(disaggregate=True):
     Qwen2_5_VLForConditionalGeneration.__init__ = init_without_encoder
     Qwen2_5_VLForConditionalGeneration._process_image_input = process_image_input
     # Qwen2_5_VLForConditionalGeneration.load_weights = load_weights_without_encoder
+    
+    #Omni Part
+    from verl.models.vllm.qwen2_5_omni import init_without_encoder_patch, load_weights
+    from vllm.model_executor.models.qwen2_5_omni_thinker import Qwen2_5OmniThinkerForConditionalGeneration
+    Qwen2_5OmniThinkerForConditionalGeneration.__init__ = init_without_encoder_patch
+    #Qwen2_5OmniThinkerForConditionalGeneration.
+    # Qwen2_5OmniThinkerForConditionalGeneration.load_weights = load_weights
 
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.utils import cdiv
@@ -99,3 +106,4 @@ def vllm_monkey_patch_llm(disaggregate=True):
 
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     GPUModelRunner.profile_run = custom_profile_run
+

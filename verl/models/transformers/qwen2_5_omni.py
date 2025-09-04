@@ -603,8 +603,8 @@ class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        image_embeds_input: Optional[torch.FloatTensor] = None,
-        video_input: Optional[torch.FloatTensor] = None,
+        image_embed: Optional[torch.FloatTensor] = None,
+        video_embed: Optional[torch.FloatTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -685,8 +685,8 @@ class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
                 audio_features = audio_features_input.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_features)
 
-            if image_embeds_input is not None:
-                image_embeds = image_embeds_input
+            if image_embed is not None:
+                image_embeds = image_embed
                 
                 image_mask = (
                     (input_ids == self.config.image_token_id)
@@ -697,9 +697,9 @@ class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
                 image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-            if video_input is not None:
+            if video_embed is not None:
                 # video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
-                video_embeds = video_input
+                video_embeds = video_embeds
                 video_mask = (
                     (input_ids == self.config.video_token_id)
                     .unsqueeze(-1)

@@ -140,11 +140,13 @@ class DataParallelPPOEncoder(BasePPOEncoder):
             else:
                 model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                image_embeds, video_embeds, image_split_sizes, video_split_sizes,audio_features = self._forward_micro_batch(model_inputs)
+                image_embeds, video_embeds, audio_features, image_split_sizes, video_split_sizes = self._forward_micro_batch(model_inputs)
             if split:
-                image_embeds = torch.split(image_embeds, image_split_sizes)
-                video_embeds = torch.split(video_embeds, video_split_sizes) if video_embeds is not None else None
-                image_embeds_list.extend(image_embeds)
+                if image_embeds is not None:
+                    image_embeds = torch.split(image_embeds, image_split_sizes)
+                    image_embeds_list.extend(image_embeds)
+                if video_embeds is not None:
+                    video_embeds = torch.split(video_embeds, video_split_sizes) if video_embeds is not None else None
                 if video_embeds is not None:
                     video_embeds_list.extend(video_embeds)
                 else:
@@ -184,6 +186,7 @@ class DataParallelPPOEncoder(BasePPOEncoder):
         mini_batches = data.split(self.config.ppo_mini_batch_size)     
         image_embeds_list = []
         video_embeds_list = []
+        audio_embeds_list = []
         image_split_sizes_list = []
         video_split_sizes_list = []
         for batch_idx, mini_batch in enumerate(mini_batches):
@@ -194,9 +197,10 @@ class DataParallelPPOEncoder(BasePPOEncoder):
             for micro_batch in micro_batches:
                 model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                 with torch.no_grad():
-                    image_embeds, video_embeds, image_split_sizes, video_split_sizes = self._forward_micro_batch(model_inputs)
+                    image_embeds, video_embeds,audio_embeds,image_split_sizes, video_split_sizes = self._forward_micro_batch(model_inputs)
                 image_embeds_list.append(torch.split(image_embeds, image_split_sizes) if image_embeds is not None else None)
                 video_embeds_list.append(torch.split(video_embeds, video_split_sizes) if video_embeds is not None else None)
+                audio_embeds_list.append(audio_embeds)
                 image_split_sizes_list.append(image_split_sizes)
                 video_split_sizes_list.append(video_split_sizes)
 
@@ -208,7 +212,7 @@ class DataParallelPPOEncoder(BasePPOEncoder):
             
         image_embeds, image_sizes = flatten_embeds_and_list(image_embeds_list, image_split_sizes_list)
         video_embeds, video_sizes = flatten_embeds_and_list(video_embeds_list, video_split_sizes_list)
-        return image_embeds, video_embeds, image_sizes, video_sizes
+        return image_embeds, video_embeds,audio_embeds,image_sizes, video_sizes
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto, encoder_input: DataProto):

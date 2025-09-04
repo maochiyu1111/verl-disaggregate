@@ -1515,7 +1515,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)  
         data = data.to(torch.cuda.current_device())     
-        image_embed, video_embed, image_sizes, video_sizes = self.actor.extract_feature_train(data=data)    
+        image_embed, video_embed, audio_embeds, image_sizes, video_sizes = self.actor.extract_feature_train(data=data)    
         if image_embed is not None and video_embed is not None:
                 embeds = {"image_embed": image_embed, "video_embed": video_embed, "image_sizes": image_sizes, "video_sizes": video_sizes}
         elif image_embed is not None and video_embed is None:
@@ -1553,18 +1553,21 @@ class ActorRolloutRefWorker_encoder(Worker):
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             # dist_log(f'rollout_forward: {len(data.non_tensor_batch["multi_modal_data"])} {data.non_tensor_batch["multi_modal_data"][0]["pixel_values"].shape}')
-            image_embed, video_embed = self.actor.extract_feature(data=data, split=True)
+            image_embed, video_embed,audio_feature = self.actor.extract_feature(data=data, split=True)
             if image_embed is not None and video_embed is not None:
                 embeds = {"image_embed": image_embed, "video_embed": video_embed}
             elif image_embed is not None and video_embed is None:
                 embeds = {"image_embed": image_embed}
             elif image_embed is None and video_embed is not None:
                 embeds = {"video_embed": video_embed}
+            elif audio_feature is not None and image_embed is not None:
+                embeds = {"image_embed": image_embed,"audio":audio_feature}
             else:
                 raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
             #dist_log(f'img_grid_thw: {len(data.non_tensor_batch["multi_modal_data"])}, img_embd: {len(image_embed)}')
             vllm_input = []
             print(f'DEBUG: {len(image_embed)} {len(data.non_tensor_batch["multi_modal_inputs"])}')
+            print(embeds)
             for embd, grid in zip(image_embed,data.non_tensor_batch["multi_modal_inputs"]):
                 vllm_input.append({"image": {"image_embeds": embd, "image_grid_thw": grid["image_grid_thw"]}})
             output = DataProto.from_dict(non_tensors={"multi_modal_data":vllm_input})
