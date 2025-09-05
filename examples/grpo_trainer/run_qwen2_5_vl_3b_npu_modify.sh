@@ -5,6 +5,19 @@ ENGINE=${1:-vllm}
 # the optimized model may not be suitable. In this case, set this value to 0 to disable the optimized model.
 export USE_OPTIMIZED_MODEL=0
 
+PROF_ARGS=(
+    actor_rollout_ref.profiler.ranks=[0] 
+    +actor_rollout_ref.profiler.step_start=2
+    +actor_rollout_ref.profiler.step_end=3 
+    +actor_rollout_ref.profiler.save_path=/home/qzy/projects/verl-disaggregate
+    trainer.profile_steps=[1,2,3,4] 
+    trainer.profile_continuous_steps=True 
+)
+
+export ENABLE_PROFILER=0
+export PROF_LOGDIR="/home/qzy/projects/verl-disaggregate"
+export TASK_PLACEMENT="disaggregated"
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=/home/qzy/datasets/geometry3k/train.parquet \
