@@ -1067,7 +1067,7 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
         # normalize ref config
         if self._is_ref and self.config.ref.log_prob_micro_batch_size is not None:
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-            self.conf
+            self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
 
     def _build_model_optimizer(
         self,
@@ -1076,14 +1076,16 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
         optim_config,
         override_model_config,
         use_remove_padding=False,
+        use_fused_kernels=False,
         enable_gradient_checkpointing=False,
         trust_remote_code=False,
         use_liger=False,
         role="actor",
+        enable_activation_offload=False,
     ):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
@@ -1130,14 +1132,8 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
                 pretrained_model_name_or_path=local_path,
                 torch_dtype=torch_dtype,
                 config=actor_model_config,
-                attn_implementation="flash_attention_2",
                 trust_remote_code=trust_remote_code,
             )
-
-            if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
-                from verl.models.transformers.monkey_patch import apply_monkey_patch
-
-                apply_monkey_patch(model=actor_module, ulysses_sp_size=self.ulysses_sequence_parallel_size)
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
@@ -1145,8 +1141,19 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
 
                 _apply_liger_kernel_to_instance(model=actor_module)
             
-            # from verl.models.transformers.monkey_patch import apply_monkey_patch_encoder
-            # apply_monkey_patch_encoder()
+            # below are monkey patch in ActorRolloutRefWorker, we may not use them
+            # fused_kernel_options = self.config.model.get("fused_kernel_options", None)
+            # fused_kernels_backend = (
+            #     fused_kernel_options.get("impl_backend", None) if fused_kernel_options is not None else None
+            # )
+
+            # apply_monkey_patch(
+            #     model=actor_module,
+            #     use_remove_padding=use_remove_padding,
+            #     ulysses_sp_size=self.ulysses_sequence_parallel_size,
+            #     use_fused_kernels=use_fused_kernels,
+            #     fused_kernels_backend=fused_kernels_backend,
+            # )
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
@@ -1197,14 +1204,14 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
                 actor_module,
                 cpu_offload=cpu_offload,
                 param_init_fn=init_fn,
-                use_orig_params=False,
                 auto_wrap_policy=auto_wrap_policy,
-                device_id=torch.cuda.current_device(),
+                device_id=get_device_id(),
                 sharding_strategy=sharding_strategy,  # zero3
                 mixed_precision=mixed_precision,
                 sync_module_states=True,
                 device_mesh=self.device_mesh,
-                forward_prefetch=False,
+                use_orig_params=fsdp_config.get("use_orig_params", False),
+                forward_prefetch=fsdp_config.get("forward_prefetch", False),
             )
         elif fsdp_strategy == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
@@ -1229,6 +1236,9 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
         else:
             raise NotImplementedError(f"not implement {fsdp_strategy}")
 
+        if enable_activation_offload:
+            enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
+            
         log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
 
         # TODO: add more optimizer args into config
@@ -1245,6 +1255,8 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
             total_steps = optim_config.get("total_training_steps", 0)
             num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
             warmup_style = optim_config.get("warmup_style", "constant")
+            min_lr_ratio = optim_config.get("min_lr_ratio", 0.0)
+            num_cycles = optim_config.get("num_cycles", 0.5)
             if num_warmup_steps < 0:
                 num_warmup_steps_ratio = optim_config.get("lr_warmup_steps_ratio", 0.0)
                 num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
@@ -1272,7 +1284,7 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
         infer_tp = self.config.rollout.tensor_model_parallel_size
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
-        rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
+        rollout_device_mesh = init_device_mesh(device_name, mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
         rollout_name = self.config.rollout.encoder.name
         if rollout_name == "hf":
             from verl.workers.rollout import HFRollout
@@ -1316,7 +1328,7 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         elif rollout_name == "sglang":
-            from verl.workers.rollout.sglang_rollout import SGLangRollout
+            from verl.workers.rollout.sglang_rollout.sglang_rollout import SGLangRollout
 
             # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to
             # SGLang's model_runner would check CUDA device capability. However, due to verl's setting,
@@ -1433,18 +1445,20 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
 
         from omegaconf import OmegaConf
 
-        override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+        override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
 
         use_remove_padding = self.config.model.get("use_remove_padding", False)
+        use_shm = self.config.model.get("use_shm", False)
+        use_fused_kernels = self.config.model.get("use_fused_kernels", False)
 
         if self._is_actor or self._is_rollout:
             # we need the model for actor and rollout
             if self._is_actor:
                 optim_config = self.config.actor.optim
-                fsdp_config = self.config.actor.fsdp_config
+                fsdp_config = omega_conf_to_dataclass(self.config.actor.fsdp_config)
             else:
                 optim_config = None
-                fsdp_config = OmegaConf.create()
+                fsdp_config = FSDPEngineConfig()
             self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
                 model_path=self.config.model.encoder.path,
                 # model_path=self.config.model.path,
@@ -1452,10 +1466,12 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
                 optim_config=optim_config,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
+                use_fused_kernels=use_fused_kernels,
                 enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
                 use_liger=self.config.model.get("use_liger", False),
                 role="actor",
+                enable_activation_offload=self.config.model.get("enable_activation_offload", False),
             )
 
             # get the original unwrapped module
@@ -1483,10 +1499,11 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
         if self._is_ref:
             self.ref_module_fsdp = self._build_model_optimizer(
                 model_path=self.config.model.encoder.path,
-                fsdp_config=self.config.ref.fsdp_config,
+                fsdp_config=omega_conf_to_dataclass(self.config.ref.fsdp_config),
                 optim_config=None,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
+                use_fused_kernels=use_fused_kernels,
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
                 use_liger=self.config.model.get("use_liger", False),
                 role="ref",
@@ -1494,6 +1511,7 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
+                self.config.ref.use_fused_kernels = use_fused_kernels
             self.ref_policy = DataParallelPPOEncoder(config=self.config.ref, encoder_module=self.ref_module_fsdp)
 
         if self._is_actor:
@@ -1510,14 +1528,14 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
     def update_actor(self, data: DataProto, encoder_input: DataProto):
         # Support all hardwares
         grad = DataProto(non_tensor_batch=data.non_tensor_batch)
-        grad = grad.to(torch.cuda.current_device())
-        encoder_input = encoder_input.to(torch.cuda.current_device())
+        grad = grad.to(get_device_id())
+        encoder_input = encoder_input.to(get_device_id())
 
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
+            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
 
         # with self.ulysses_sharding_manager:
             # data = self.ulysses_sharding_manager.preprocess_data(data=data)
@@ -1557,7 +1575,7 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)  
-        data = data.to(torch.cuda.current_device())     
+        data = data.to(get_device_id())     
         image_embed, video_embed, image_sizes, video_sizes = self.actor.extract_feature_train(data=data)    
         if image_embed is not None and video_embed is not None:
                 embeds = {"image_embed": image_embed, "video_embed": video_embed, "image_sizes": image_sizes, "video_sizes": video_sizes}
@@ -1586,7 +1604,7 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)  
 
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        data = data.to(get_device_id())
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["use_dynamic_bsz"] = False
@@ -1633,7 +1651,7 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        data = data.to(get_device_id())
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
@@ -1681,7 +1699,7 @@ class ActorRolloutRefWorker_encoder(Worker, DistProfilerExtension):
         assert self._is_ref
 
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        data = data.to(get_device_id())
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
@@ -1756,7 +1774,14 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
         import torch.distributed
 
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group()
+            rank = int(os.environ.get("RANK", 0))
+            world_size = int(os.environ.get("WORLD_SIZE", 1))
+            torch.distributed.init_process_group(
+                backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}",
+                rank=rank,
+                world_size=world_size,
+                init_method=os.environ.get("DIST_INIT_METHOD", None),
+            )
 
         self._prof = None
         self._prof_enabled = False
@@ -1774,7 +1799,7 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
         self.ulysses_sequence_parallel_size = self.config.actor.get("ulysses_sequence_parallel_size", 1)
         dp = world_size // self.ulysses_sequence_parallel_size
         if self.ulysses_sequence_parallel_size > 1:
-            self.ulysses_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"])
+            self.ulysses_device_mesh = init_device_mesh(device_name, mesh_shape=(dp, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"])
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
@@ -1804,15 +1829,26 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
         if self._is_actor:
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
             self.config.actor.ppo_mini_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
-            assert self.config.actor.ppo_mini_batch_size > 0, f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after normalization"
+            assert self.config.actor.ppo_mini_batch_size > 0, (
+                f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after "
+                f"normalization"
+            )
             # micro bsz
             if self.config.actor.ppo_micro_batch_size is not None:
-                self.config.actor.ppo_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+                self.config.actor.ppo_micro_batch_size //= (
+                    self.device_mesh.size() // self.ulysses_sequence_parallel_size
+                )
                 self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
 
             if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
-                assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
-                assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, (
+                    f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by "
+                    f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                )
+                assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, (
+                    f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than "
+                    f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                )
 
         # normalize rollout config
         if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
@@ -1826,18 +1862,20 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
     def _build_model_optimizer(
         self,
         model_path,
-        fsdp_config,
+        fsdp_config: FSDPEngineConfig,
         optim_config,
         override_model_config,
         use_remove_padding=False,
+        use_fused_kernels=False,
         enable_gradient_checkpointing=False,
         trust_remote_code=False,
         use_liger=False,
         role="actor",
+        enable_activation_offload=False,
     ):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq, Qwen2_5_VLTextModel
 
         from verl.utils.model import get_generation_config, print_model_size, update_model_config
@@ -1851,7 +1889,6 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-        # 这个地方暂时也加上吧
         self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code)
 
         torch_dtype = fsdp_config.get("model_dtype", None)
@@ -1861,7 +1898,7 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
 
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
@@ -1888,21 +1925,14 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
                 # only for disaggregate test
                 torch_dtype=torch.float16,
                 config=actor_model_config,
-                attn_implementation="flash_attention_2",
                 trust_remote_code=trust_remote_code,
             )
             # 遇到报错，actor_module在meta，fsdp在cuda:0
-            actor_module = actor_module.to_empty(device=torch.device("cuda", torch.cuda.current_device()), recurse=True)
+            actor_module = actor_module.to_empty(device=torch.device(device_name), recurse=True)
             #lm_head_sd = torch.load("/workspace/models/qwen2.5vl-lm_head.pt")
             llm_sd = torch.load("/workspace/yym/models/qwen2.5vl-3b-llm.pt")
             #actor_module.lm_head.load_state_dict(lm_head_sd)
             actor_module.language_model.load_state_dict(llm_sd)
-            # breakpoint()
-
-            if use_remove_padding or self.ulysses_sequence_parallel_size > 1:
-                from verl.models.transformers.monkey_patch import apply_monkey_patch
-
-                apply_monkey_patch(model=actor_module, ulysses_sp_size=self.ulysses_sequence_parallel_size)
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
@@ -1910,9 +1940,18 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
 
                 _apply_liger_kernel_to_instance(model=actor_module)
                 
-            # from verl.models.transformers.monkey_patch import apply_monkey_patch_llm
-            # apply_monkey_patch_llm()
-            # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
+            fused_kernel_options = self.config.model.get("fused_kernel_options", None)
+            fused_kernels_backend = (
+                fused_kernel_options.get("impl_backend", None) if fused_kernel_options is not None else None
+            )
+
+            apply_monkey_patch(
+                model=actor_module,
+                use_remove_padding=use_remove_padding,
+                ulysses_sp_size=self.ulysses_sequence_parallel_size,
+                use_fused_kernels=use_fused_kernels,
+                fused_kernels_backend=fused_kernels_backend,
+            )
             actor_module.to(torch_dtype)
 
             if enable_gradient_checkpointing:
@@ -1960,14 +1999,14 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
                 actor_module,
                 cpu_offload=cpu_offload,
                 param_init_fn=init_fn,
-                use_orig_params=False,
                 auto_wrap_policy=auto_wrap_policy,
-                device_id=torch.cuda.current_device(),
+                device_id=get_device_id(),
                 sharding_strategy=sharding_strategy,  # zero3
                 mixed_precision=mixed_precision,
                 sync_module_states=True,
                 device_mesh=self.device_mesh,
-                forward_prefetch=False,
+                use_orig_params=fsdp_config.get("use_orig_params", False),
+                forward_prefetch=fsdp_config.get("forward_prefetch", False),
             )
         elif fsdp_strategy == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
@@ -1992,6 +2031,8 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
         else:
             raise NotImplementedError(f"not implement {fsdp_strategy}")
 
+        if enable_activation_offload:
+            enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
         log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
 
         # TODO: add more optimizer args into config
@@ -2008,6 +2049,8 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
             total_steps = optim_config.get("total_training_steps", 0)
             num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
             warmup_style = optim_config.get("warmup_style", "constant")
+            min_lr_ratio = optim_config.get("min_lr_ratio", 0.0)
+            num_cycles = optim_config.get("num_cycles", 0.5)
             if num_warmup_steps < 0:
                 num_warmup_steps_ratio = optim_config.get("lr_warmup_steps_ratio", 0.0)
                 num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
@@ -2017,7 +2060,10 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
             if warmup_style == "constant":
                 actor_lr_scheduler = get_constant_schedule_with_warmup(optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps)
             elif warmup_style == "cosine":
-                actor_lr_scheduler = get_cosine_schedule_with_warmup(optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps)
+                actor_lr_scheduler = get_cosine_schedule_with_warmup(
+                    optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps,
+                    min_lr_ratio=min_lr_ratio,
+                    num_cycles=num_cycles,)
             else:
                 raise NotImplementedError(f"Warmup style {warmup_style} is not supported")
 
@@ -2035,7 +2081,7 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
         infer_tp = self.config.rollout.tensor_model_parallel_size
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
-        rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
+        rollout_device_mesh = init_device_mesh(device_name, mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
         rollout_name = self.config.rollout.name
         if rollout_name == "hf":
             from verl.workers.rollout import HFRollout
@@ -2081,7 +2127,7 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         elif rollout_name == "sglang":
-            from verl.workers.rollout.sglang_rollout import SGLangRollout
+            from verl.workers.rollout.sglang_rollout.sglang_rollout import SGLangRollout
 
             # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to
             # SGLang's model_runner would check CUDA device capability. However, due to verl's setting,
@@ -2198,28 +2244,32 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
 
         from omegaconf import OmegaConf
 
-        override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+        override_model_config = OmegaConf.to_container(OmegaConf.create(self.config.model.get("override_config", {})))
 
         use_remove_padding = self.config.model.get("use_remove_padding", False)
-
+        use_shm = self.config.model.get("use_shm", False)
+        use_fused_kernels = self.config.model.get("use_fused_kernels", False)
+        
         if self._is_actor or self._is_rollout:
             # we need the model for actor and rollout
             if self._is_actor:
                 optim_config = self.config.actor.optim
-                fsdp_config = self.config.actor.fsdp_config
+                fsdp_config = omega_conf_to_dataclass(self.config.actor.fsdp_config)
             else:
                 optim_config = None
-                fsdp_config = OmegaConf.create()
+                fsdp_config = FSDPEngineConfig()
             self.actor_module_fsdp, self.actor_optimizer, self.actor_lr_scheduler, self.actor_model_config = self._build_model_optimizer(
                 model_path=self.config.model.llm.path,
                 fsdp_config=fsdp_config,
                 optim_config=optim_config,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
+                use_fused_kernels=use_fused_kernels,
                 enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
                 use_liger=self.config.model.get("use_liger", False),
                 role="actor",
+                enable_activation_offload=self.config.model.get("enable_activation_offload", False),
             )
 
             # get the original unwrapped module
@@ -2251,6 +2301,7 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
                 optim_config=None,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
+                use_fused_kernels=use_fused_kernels,
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
                 use_liger=self.config.model.get("use_liger", False),
                 role="ref",
@@ -2258,9 +2309,10 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
+                self.config.ref.use_fused_kernels = use_fused_kernels
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
-        if self._is_actor:
+        if self._is_actor and self._is_rollout :
             self.flops_counter = FlopsCounter(self.actor_model_config)
             self.checkpoint_manager = FSDPCheckpointManager(
                 model=self.actor_module_fsdp,
@@ -2273,13 +2325,13 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        data = data.to(get_device_id())
 
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
+            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
@@ -2316,7 +2368,7 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
-        prompts = prompts.to(torch.cuda.current_device())
+        prompts = prompts.to(get_device_id())
 
         assert self._is_rollout
 
@@ -2356,7 +2408,7 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        data = data.to(get_device_id())
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
@@ -2390,7 +2442,7 @@ class ActorRolloutRefWorker_llm(Worker, DistProfilerExtension):
         assert self._is_ref
 
         # Support all hardwares
-        data = data.to(torch.cuda.current_device())
+        data = data.to(get_device_id())
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size

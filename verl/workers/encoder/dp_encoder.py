@@ -23,7 +23,7 @@ import os
 from typing import Tuple
 
 import torch
-from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+# from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -38,6 +38,7 @@ from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_b
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
 from verl.workers.encoder import BasePPOEncoder
+from verl.utils.device import get_device_id
 
 __all__ = ["DataParallelPPOEncoder"]
 
@@ -229,8 +230,8 @@ class DataParallelPPOEncoder(BasePPOEncoder):
                     # current_video_embed = self.video_embeds_list[global_index]
                     with torch.enable_grad():
                         current_image_embed, current_video_embed, *_ = self._forward_micro_batch({**micro_batch_input.non_tensor_batch})
-                    image_grad = torch.cat(micro_batch.non_tensor_batch["image_embed_grad"].tolist(), dim=0).to(dtype=torch.bfloat16, device=torch.cuda.current_device()) if "image_embed_grad" in micro_batch.non_tensor_batch.keys() else None
-                    video_grad = torch.cat(micro_batch.non_tensor_batch["video_embed_grad"].tolist(), dim=0).to(dtype=torch.bfloat16, device=torch.cuda.current_device()) if "video_embed_grad" in micro_batch.non_tensor_batch.keys() else None
+                    image_grad = torch.cat(micro_batch.non_tensor_batch["image_embed_grad"].tolist(), dim=0).to(dtype=torch.bfloat16, device=get_device_id()) if "image_embed_grad" in micro_batch.non_tensor_batch.keys() else None
+                    video_grad = torch.cat(micro_batch.non_tensor_batch["video_embed_grad"].tolist(), dim=0).to(dtype=torch.bfloat16, device=get_device_id()) if "video_embed_grad" in micro_batch.non_tensor_batch.keys() else None
                     if current_image_embed is not None and image_grad is not None:
                         assert current_image_embed.shape == image_grad.shape
                         current_image_embed.backward(gradient=image_grad, retain_graph=True)
