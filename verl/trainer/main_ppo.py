@@ -178,7 +178,7 @@ class TaskRunner:
 
         resource_pool_spec = {
             actor_rollout_encoder_id: [1],
-            actor_rollout_llm_id: [1],
+            actor_rollout_llm_id: [4],
             ref_encoder_id: [1],
             ref_llm_id: [1]
         }

@@ -986,7 +986,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         self._is_actor = self.role == "encoder_actor_rollout"
         self._is_rollout = self.role == "encoder_actor_rollout"
         self._is_ref = self.role in ["encoder_ref","audioencoder_ref"]
-        self._is_audio = self.role in ["audioencoder_actor","audioencoder_ref"]
+        self._is_audio = "audio" in self.role
         self._is_vision = self.role in ["encoder_ref","encoder_actor","encoder_actor_rollout"]
         profiler_config = omega_conf_to_dataclass(config.get("profiler"))
         DistProfilerExtension.__init__(
@@ -1515,7 +1515,7 @@ class ActorRolloutRefWorker_encoder(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)  
         data = data.to(torch.cuda.current_device())     
-        image_embed, video_embed, audio_embeds, image_sizes, video_sizes = self.actor.extract_feature_train(data=data)    
+        image_embed, video_embed, audio_embeds, image_sizes, video_sizes = self.actor.extract_feature_train(data=data)
         if image_embed is not None and video_embed is not None:
                 embeds = {"image_embed": image_embed, "video_embed": video_embed, "image_sizes": image_sizes, "video_sizes": video_sizes}
         elif image_embed is not None and video_embed is None:
@@ -1565,12 +1565,21 @@ class ActorRolloutRefWorker_encoder(Worker):
             else:
                 raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
             #dist_log(f'img_grid_thw: {len(data.non_tensor_batch["multi_modal_data"])}, img_embd: {len(image_embed)}')
-            vllm_input = []
+            mm_data = []
             print(f'DEBUG: {len(image_embed)} {len(data.non_tensor_batch["multi_modal_inputs"])}')
-            print(embeds)
-            for embd, grid in zip(image_embed,data.non_tensor_batch["multi_modal_inputs"]):
-                vllm_input.append({"image": {"image_embeds": embd, "image_grid_thw": grid["image_grid_thw"]}})
-            output = DataProto.from_dict(non_tensors={"multi_modal_data":vllm_input})
+            #print(embeds)
+            if self.config.is_omni:
+                for embd, grid in zip(image_embed,data.non_tensor_batch["multi_modal_inputs"]):
+                    if audio_feature is not None:
+                        mm_data.append({{"image": {"image_embeds": embd, "image_grid_thw": grid["image_grid_thw"]}},{"audio":audio_feature}})
+                    else:
+                        mm_data.append({"image": {"image_embeds": embd, "image_grid_thw": grid["image_grid_thw"]}})
+                #print(mm_data)
+            else:
+                for embd, grid in zip(image_embed,data.non_tensor_batch["multi_modal_inputs"]):
+                    mm_data.append({"image": {"image_embeds": embd, "image_grid_thw": grid["image_grid_thw"]}})
+
+            output = DataProto.from_dict(non_tensors={"multi_modal_data":mm_data})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
@@ -1910,12 +1919,12 @@ class ActorRolloutRefWorker_llm(Worker):
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
         # 由于改了类名，这个地方匹配不到，自行编写config，仅针对本测试的代码
         if 'omni' in model_path.lower():
-            wrap_config = {"transformer_layer_cls_to_wrap": ["model.Qwen2_5_OmniDecoderLayer"],}
+            wrap_config = {}
         else:
             wrap_config = {"transformer_layer_cls_to_wrap": ["Qwen2_5_VLDecoderLayer"],}
         
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
-        #auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)
+        #auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
+        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=wrap_config)
 
         if self._is_rollout and self.config.rollout.name == "hf":
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma

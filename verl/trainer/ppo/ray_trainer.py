@@ -838,8 +838,9 @@ class RayPPOTrainer:
                 llm_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.LLMRef], config=self.config.actor_rollout_ref, role="llm_ref")
                 self.resource_pool_to_cls[resource_pool]["llm_ref"] = llm_ref_cls
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.AudioEncoderRef)
-                audioencoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.AudioEncoderRef], config=self.config.actor_rollout_ref, role="audioencoder_ref")
-                self.resource_pool_to_cls[resource_pool]["audioencoder_ref"] = audioencoder_ref_cls
+                if self.config.actor_rollout_ref.is_omni:
+                    audioencoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.AudioEncoderRef], config=self.config.actor_rollout_ref, role="audioencoder_ref")
+                    self.resource_pool_to_cls[resource_pool]["audioencoder_ref"] = audioencoder_ref_cls
             else:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
                 ref_policy_cls = RayClassWithInitArgs(
@@ -895,10 +896,11 @@ class RayPPOTrainer:
             if self.disaggregate_ref:
                 self.ref_encoder_wg = all_wg["encoder_ref"]
                 self.ref_llm_wg = all_wg["llm_ref"]
-                self.ref_audioencoder_wg = all_wg["audioencoder_ref"]
                 self.ref_encoder_wg.init_model()
-                self.ref_audioencoder_wg.init_model()
                 self.ref_llm_wg.init_model()
+                if self.config.actor_rollout_ref.is_omni:
+                    self.ref_audioencoder_wg = all_wg["audioencoder_ref"]
+                    self.ref_audioencoder_wg.init_model()
             else:
                 self.ref_policy_wg = all_wg["ref"]
                 self.ref_policy_wg.init_model()

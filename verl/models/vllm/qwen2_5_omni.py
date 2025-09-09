@@ -54,3 +54,37 @@ def load_weights(self, weights: Iterable[tuple[str,
                                             mapper=self.hf_to_vllm_mapper)
 
     return loaded_weights
+
+from typing import Union, Mapping
+from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.inputs import MultiModalKwargs
+def _apply_hf_processor_main_patch(
+    self,
+    prompt: Union[str, list[int]],
+    mm_items: MultiModalDataItems,
+    hf_processor_mm_kwargs: Mapping[str, object],
+    *,
+    enable_hf_prompt_update: bool,
+) -> tuple[list[int], MultiModalKwargs, bool]:
+    """
+    Qwen2.5-Omni reimplements this function to handle text only.
+    """
+    # if isinstance(prompt, str):
+    #     if enable_hf_prompt_update:
+    #         return self._apply_hf_processor_text_mm(
+    #             prompt_text=prompt,
+    #             mm_items=mm_items,
+    #             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    #         )
+    #     tokenizer = self.info.get_tokenizer()
+    #     prompt_ids = encode_tokens(tokenizer, prompt)
+    # else:
+    prompt_ids = self._apply_hf_processor_tokens_only(prompt)
+    # prompt_ids = prompt["raw_prompt_ids"]
+    mm_kwargs = self._apply_hf_processor_mm_only(
+        mm_items=mm_items,
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    )
+    # mm_kwargs = MultiModalKwargs.from_items(mm_items)
+        
+    return prompt_ids, mm_kwargs, False

@@ -699,7 +699,7 @@ class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
 
             if video_embed is not None:
                 # video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
-                video_embeds = video_embeds
+                video_embeds = video_embed
                 video_mask = (
                     (input_ids == self.config.video_token_id)
                     .unsqueeze(-1)

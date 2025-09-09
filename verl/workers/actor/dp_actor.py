@@ -114,13 +114,17 @@ class DataParallelPPOActor(BasePPOActor):
             position_ids = micro_batch["position_ids"]
             image_embed = torch.cat(micro_batch["image_embed"].tolist(), dim=0) if "image_embed" in micro_batch else None
             video_embed = torch.cat(micro_batch["video_embed"].tolist(), dim=0) if "video_embed" in micro_batch else None
+            audio = torch.cat(micro_batch["audio"].tolist(), dim=0) if "audio" in micro_batch else None
             if encoder_grad:
                 if image_embed is not None:
                     image_embed.requires_grad_(True)
                 if video_embed is not None:
                     video_embed.requires_grad_(True)
+                if audio is not None:
+                    audio.requires_grad(True)
                 self.current_image_embed = image_embed
                 self.current_video_embed = video_embed
+                self.current_audio = audio
             entropy = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
@@ -182,7 +186,8 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
-
+                    if self.current_audio is not None:
+                        extra_args["audio_features_input"] = audio
                 if disaggregate:  
                     output = self.actor_module(
                         input_ids=input_ids_rmpad,
@@ -274,7 +279,8 @@ class DataParallelPPOActor(BasePPOActor):
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
-
+                    if self.current_audio is not None:
+                        extra_args["audio_features_input"] = audio
                 if disaggregate:   
                     output = self.actor_module(
                         input_ids=input_ids,
@@ -426,6 +432,8 @@ class DataParallelPPOActor(BasePPOActor):
             non_tensor_select_keys.append("image_embed")
         if "video_embed" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("video_embed")
+        if "audio" in data.non_tensor_batch.keys():
+            non_tensor_select_keys.append("audio")
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
         if use_dynamic_bsz:
@@ -612,6 +620,7 @@ class DataParallelPPOActor(BasePPOActor):
         metrics = {}
         image_embed_grad_list = []
         video_embed_grad_list = []
+        audio_grad_list = []
         for _ in range(self.config.ppo_epochs):
             for mini_batch in mini_batches:
                 if self.config.use_dynamic_bsz:
@@ -691,7 +700,9 @@ class DataParallelPPOActor(BasePPOActor):
                     if hasattr(self, 'current_video_embed') and self.current_video_embed is not None: 
                         video_embed_grad = self.current_video_embed.grad
                         video_embed_grad_list.append(torch.split(video_embed_grad, micro_batch.non_tensor_batch["video_sizes"].tolist()))
-                    
+                    if hasattr(self, 'current_audio') and self.current_audio is not None:
+                        audio_grad = self.current_audio.grad
+                        audio_grad_list.append(torch.split(audio_grad, micro_batch.non_tensor_batch["image_sizes"].tolist()))
                     micro_batch_metrics.update(
                         {
                             "actor/pg_loss": pg_loss.detach().item(),
@@ -720,7 +731,11 @@ class DataParallelPPOActor(BasePPOActor):
             encoder_gradients = {"image_embed_grad": image_embed_grad_list}
         elif not image_embed_grad_list and video_embed_grad_list:
             encoder_gradients = {"video_embed_grad": video_embed_grad_list}
+        elif not image_embed_grad and audio_grad_list :
+            encoder_gradients = {"audio_grad": audio_grad_list}
+        elif image_embed_grad and audio_grad_list:
+            encoder_gradients = {"image_embed_grad": image_embed_grad_list, "audio_grad": audio_grad_list}
         else:
-            raise ValueError("Both image_embed and video_embed are None. At least one of them must be provided.")
+            raise ValueError("Both image_embed and video_embed/audio are None. At least one of them must be provided.")
         self.actor_optimizer.zero_grad()
         return metrics, encoder_gradients

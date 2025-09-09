@@ -1,5 +1,6 @@
 set -x
 export HYDRA_FULL_ERROR=1
+export VLLM_USE_V1=0
 ENGINE=${1:-vllm}
 # If you are using vllm<=0.6.3, you might need to set the following environment variable to avoid bugs:
 # export VLLM_ATTENTION_BACKEND=XFORMERS

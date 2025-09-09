@@ -13,10 +13,10 @@ def vllm_monkey_patch_llm(disaggregate=True):
     # Qwen2_5_VLForConditionalGeneration.load_weights = load_weights_without_encoder
     
     #Omni Part
-    from verl.models.vllm.qwen2_5_omni import init_without_encoder_patch, load_weights
-    from vllm.model_executor.models.qwen2_5_omni_thinker import Qwen2_5OmniThinkerForConditionalGeneration
+    from verl.models.vllm.qwen2_5_omni import init_without_encoder_patch, load_weights,_apply_hf_processor_main_patch
+    from vllm.model_executor.models.qwen2_5_omni_thinker import Qwen2_5OmniThinkerForConditionalGeneration,Qwen2_5OmniThinkerMultiModalProcessor
     Qwen2_5OmniThinkerForConditionalGeneration.__init__ = init_without_encoder_patch
-    #Qwen2_5OmniThinkerForConditionalGeneration.
+    Qwen2_5OmniThinkerMultiModalProcessor._apply_hf_processor_main = _apply_hf_processor_main_patch
     # Qwen2_5OmniThinkerForConditionalGeneration.load_weights = load_weights
 
     from vllm.distributed.parallel_state import get_pp_group
@@ -104,6 +104,14 @@ def vllm_monkey_patch_llm(disaggregate=True):
         self.encoder_cache.clear()
         gc.collect()
 
+    def v0profile_run(self) -> None:
+        max_num_batched_tokens = \
+            self.scheduler_config.max_num_batched_tokens
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        #self._dummy_run(max_num_batched_tokens, max_num_seqs)
+
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.worker.model_runner import GPUModelRunnerBase
     GPUModelRunner.profile_run = custom_profile_run
+    GPUModelRunnerBase.profile_run = v0profile_run
 

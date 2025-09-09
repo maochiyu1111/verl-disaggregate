@@ -88,7 +88,7 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
-
+        self.model_path = model_path
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= torch.distributed.get_world_size(), (
             "tensor parallel size should be less than or equal to the world size"
@@ -163,7 +163,7 @@ class vLLMRollout(BaseRollout):
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
         if "omni" in model_path.lower():
-            engine_kwargs["limit_mm_per_prompt"] = {"audio": 1, "image": 1}
+            engine_kwargs["limit_mm_per_prompt"] = {"image": 1}
         # engine_kwargs["skip_mm_profiling"] = True
 
         self.inference_engine = LLM(
@@ -270,15 +270,17 @@ class vLLMRollout(BaseRollout):
 
         if "multi_modal_data" in non_tensor_batch:
             vllm_inputs = []
+            print(f'DEBUG:{len(non_tensor_batch["raw_prompt_ids"])},{len(non_tensor_batch["multi_modal_data"])}')
             for raw_prompt_ids, multi_modal_data in zip(
                 non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data"), strict=True
             ):
+                print(multi_modal_data)
                 if "audio" in multi_modal_data:
                     vllm_inputs.append(
                         {
                             "prompt_token_ids": list(raw_prompt_ids),
                             "multi_modal_data": multi_modal_data,
-                            "mm_processor_kwargs": {"use_audio_in_video": False,},
+                            "mm_processor_kwargs": {"use_audio_in_video": False,}
                         }
                     )
                 else:
@@ -330,12 +332,22 @@ class vLLMRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
-            outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
-                sampling_params=self.sampling_params,
-                lora_request=lora_requests,
-                use_tqdm=False,
-            )
+            if "omni" in self.model_path.lower():
+                print("DEBUG: omni mode",vllm_inputs[0]["prompt_token_ids"])
+                outputs = self.inference_engine.generate(
+                    prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                    sampling_params=self.sampling_params,
+                    lora_request=lora_requests,
+                    use_tqdm=False,
+                )
+                # mm_processor_kwargs={"use_audio_in_video": False,},
+            else:
+                outputs = self.inference_engine.generate(
+                    prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                    sampling_params=self.sampling_params,
+                    lora_request=lora_requests,
+                    use_tqdm=False,
+                )
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
