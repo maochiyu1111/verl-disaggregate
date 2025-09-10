@@ -158,6 +158,7 @@ class TaskRunner:
         #     Role.Critic: ray.remote(CriticWorker),
         # }
         from verl.workers.fsdp_workers import ActorRolloutRefWorker_encoder, ActorRolloutRefWorker_llm
+
         role_worker_mapping = {
             Role.LLMActorRollout: ray.remote(ActorRolloutRefWorker_llm),
             Role.EncoderActorRollout: ray.remote(ActorRolloutRefWorker_encoder),
@@ -189,8 +190,12 @@ class TaskRunner:
         mapping = {
             Role.LLMActorRollout: actor_rollout_llm_id,
             Role.EncoderActorRollout: actor_rollout_encoder_id,
+            Role.AudioEncoderActorRollout: actor_rollout_encoder_id,
             Role.Critic: actor_rollout_llm_id,
         }
+        if config.actor_rollout_ref.is_omni:
+            role_worker_mapping[Role.AudioEncoderActorRollout] = ray.remote(ActorRolloutRefWorker_encoder)
+            mapping[Role.AudioEncoderActorRollout] = actor_rollout_encoder_id
 
         # We should adopt a multi-source reward function here:
         # - for rule-based rm, we directly call a reward score
@@ -214,10 +219,11 @@ class TaskRunner:
             # mapping[Role.RefPolicy] = ref_id
             role_worker_mapping[Role.EncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
             role_worker_mapping[Role.LLMRef] = ray.remote(ActorRolloutRefWorker_llm)
-            role_worker_mapping[Role.AudioEncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
-            mapping[Role.AudioEncoderRef] = ref_encoder_id
             mapping[Role.EncoderRef] = ref_encoder_id
             mapping[Role.LLMRef] = ref_llm_id
+            if config.actor_rollout_ref.is_omni:
+                role_worker_mapping[Role.AudioEncoderRef] = ray.remote(ActorRolloutRefWorker_encoder)
+                mapping[Role.AudioEncoderRef] = ref_encoder_id
 
         # Load the reward manager for training and validation.
         reward_fn = load_reward_manager(

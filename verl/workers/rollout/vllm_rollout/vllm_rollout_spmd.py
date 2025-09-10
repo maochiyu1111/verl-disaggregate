@@ -274,7 +274,7 @@ class vLLMRollout(BaseRollout):
             for raw_prompt_ids, multi_modal_data in zip(
                 non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data"), strict=True
             ):
-                print(multi_modal_data)
+                #print(multi_modal_data)
                 if "audio" in multi_modal_data:
                     vllm_inputs.append(
                         {
@@ -333,6 +333,8 @@ class vLLMRollout(BaseRollout):
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
             if "omni" in self.model_path.lower():
+                from verl.models.transformers.monkey_patch import apply_patch_for_omni_processor
+                apply_patch_for_omni_processor(trigger=True)
                 print("DEBUG: omni mode",vllm_inputs[0]["prompt_token_ids"])
                 outputs = self.inference_engine.generate(
                     prompts=vllm_inputs,  # because we have already convert it to prompt token id

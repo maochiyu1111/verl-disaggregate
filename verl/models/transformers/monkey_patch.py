@@ -361,3 +361,12 @@ def apply_monkey_patch_llm():
     # Qwen2_5_VLModel.llm_forward = llm_forward
     Qwen2_5OmniThinkerTextModel.llm_forward = omni_llm_forward
     pass
+
+def apply_patch_for_omni_processor(trigger:Optional[bool]=False):
+    from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import Qwen2_5OmniProcessor
+    from verl.models.transformers.qwen2_5_omni import replace_multimodal_special_tokens_patch
+    orin_func = Qwen2_5OmniProcessor.replace_multimodal_special_tokens 
+    if trigger:
+        Qwen2_5OmniProcessor.replace_multimodal_special_tokens = replace_multimodal_special_tokens_patch
+    else:
+        Qwen2_5OmniProcessor.replace_multimodal_special_tokens = orin_func

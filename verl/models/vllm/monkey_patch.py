@@ -13,10 +13,13 @@ def vllm_monkey_patch_llm(disaggregate=True):
     # Qwen2_5_VLForConditionalGeneration.load_weights = load_weights_without_encoder
     
     #Omni Part
-    from verl.models.vllm.qwen2_5_omni import init_without_encoder_patch, load_weights,_apply_hf_processor_main_patch
-    from vllm.model_executor.models.qwen2_5_omni_thinker import Qwen2_5OmniThinkerForConditionalGeneration,Qwen2_5OmniThinkerMultiModalProcessor
+    from verl.models.vllm.qwen2_5_omni import init_without_encoder_patch, load_weights,_apply_hf_processor_main_patch,process_audio_input,process_image_input,apply_hf_processor_mm_only
+    from vllm.model_executor.models.qwen2_5_omni_thinker import Qwen2_5OmniThinkerForConditionalGeneration,Qwen2_5OmniThinkerMultiModalProcessor,Qwen2_5OmniConditionalGenerationMixin
     Qwen2_5OmniThinkerForConditionalGeneration.__init__ = init_without_encoder_patch
     Qwen2_5OmniThinkerMultiModalProcessor._apply_hf_processor_main = _apply_hf_processor_main_patch
+    Qwen2_5OmniConditionalGenerationMixin._process_audio_input = process_audio_input
+    Qwen2_5OmniConditionalGenerationMixin._process_image_input = process_image_input
+    Qwen2_5OmniThinkerMultiModalProcessor._apply_hf_processor_mm_only = apply_hf_processor_mm_only
     # Qwen2_5OmniThinkerForConditionalGeneration.load_weights = load_weights
 
     from vllm.distributed.parallel_state import get_pp_group

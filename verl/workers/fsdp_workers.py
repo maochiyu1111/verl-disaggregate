@@ -981,7 +981,7 @@ class ActorRolloutRefWorker_encoder(Worker):
 
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         self.role = role
-        assert self.role in ["encoder_ref", "encoder_actor_rollout","audioencoder_actor","audioencoder_ref"]
+        assert self.role in ["encoder_ref", "encoder_actor_rollout","audioencoder_actor_rollout","audioencoder_ref"]
 
         self._is_actor = self.role == "encoder_actor_rollout"
         self._is_rollout = self.role == "encoder_actor_rollout"
@@ -1085,14 +1085,17 @@ class ActorRolloutRefWorker_encoder(Worker):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
+        # if 'omni' in model_path.lower():
+        #     if self._is_vision:
+        #         actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config.vision_config
+        #     if self._is_audio:
+        #         actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config.audio_config
+        #     #config file differ from tf's define! load from config file directly
+        # else:
+        
+        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
         if 'omni' in model_path.lower():
-            if self._is_vision:
-                actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config.vision_config
-            if self._is_audio:
-                actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config.audio_config
-            #config file differ from tf's define! load from config file directly
-        else:
-            actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+            actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config
 
         # encoder doesn't need generation_config
         # self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
@@ -1831,7 +1834,7 @@ class ActorRolloutRefWorker_llm(Worker):
             #actor_model_config = Qwen2_5OmniThinkerConfig(text_config=Qwen2_5OmniTextConfig(vocab_size=151936,hidden_size=2048,intermediate_size=11008))
             #config file differ from tf's define! load from config file directly
             from transformers.configuration_utils import PretrainedConfig
-            actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config.text_config
+            actor_model_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config
             self.generation_config = Qwen2_5OmniConfig.from_json_file(os.path.join(local_path, 'config.json')).thinker_config
         else:
             actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)

@@ -81,7 +81,8 @@ class Role(Enum):
     LLMRef = 9
     LLMActorRollout = 10
     AudioEncoderRef = 11
-    AudioEncoderActor = 12
+    AudioEncoderActorRollout = 12
+
 
 
 @dataclass
@@ -354,14 +355,14 @@ class RayPPOTrainer:
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
         if self.hybrid_engine:
-            assert Role.ActorRollout in role_worker_mapping or Role.EncoderActorRollout in role_worker_mapping, f"{role_worker_mapping.keys()=}"
+            assert Role.ActorRollout in role_worker_mapping or Role.EncoderActorRollout in role_worker_mapping or Role.AudioEncoderActorRollout in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping or Role.EncoderRef in role_worker_mapping or Role.AudioEncoderRef in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.disaggregate_ref = Role.EncoderRef in role_worker_mapping or Role.AudioEncoderRef in role_worker_mapping
-        self.disaggregate_actor_rollout = Role.EncoderActorRollout in role_worker_mapping
+        self.disaggregate_actor_rollout = Role.EncoderActorRollout in role_worker_mapping or Role.AudioEncoderActorRollout in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -799,7 +800,16 @@ class RayPPOTrainer:
                     # profile_option=self.config.trainer.npu_profile.options,
                 )
                 self.resource_pool_to_cls[resource_pool]["encoder_actor_rollout"] = encoder_ref_cls
-                
+                if self.config.actor_rollout_ref.is_omni:
+                    resource_pool = self.resource_pool_manager.get_resource_pool(Role.AudioEncoderActorRollout)
+                    encoder_ref_cls =  RayClassWithInitArgs(
+                        cls=self.role_worker_mapping[Role.AudioEncoderActorRollout],
+                        config=self.config.actor_rollout_ref,
+                        role="audioencoder_actor_rollout",
+                        # profile_option=self.config.trainer.npu_profile.options,
+                    )
+                    self.resource_pool_to_cls[resource_pool]["audioencoder_actor_rollout"] = encoder_ref_cls
+
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMActorRollout)
                 llm_ref_cls =  RayClassWithInitArgs(
                     cls=self.role_worker_mapping[Role.LLMActorRollout],
@@ -837,8 +847,8 @@ class RayPPOTrainer:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.LLMRef)
                 llm_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.LLMRef], config=self.config.actor_rollout_ref, role="llm_ref")
                 self.resource_pool_to_cls[resource_pool]["llm_ref"] = llm_ref_cls
-                resource_pool = self.resource_pool_manager.get_resource_pool(Role.AudioEncoderRef)
                 if self.config.actor_rollout_ref.is_omni:
+                    resource_pool = self.resource_pool_manager.get_resource_pool(Role.AudioEncoderRef)
                     audioencoder_ref_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.AudioEncoderRef], config=self.config.actor_rollout_ref, role="audioencoder_ref")
                     self.resource_pool_to_cls[resource_pool]["audioencoder_ref"] = audioencoder_ref_cls
             else:

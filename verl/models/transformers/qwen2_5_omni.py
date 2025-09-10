@@ -587,24 +587,28 @@ def get_rope_index_omni(
 # for disaggregate
 # forward for LLM
 # patch Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
-from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration,Qwen2_5OmniThinkerCausalLMOutputWithPast,Qwen2_5OmniThinkerTextModel,Qwen2_5OmniPreTrainedModel
+from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration,Qwen2_5OmniPreTrainedModelForConditionalGeneration,Qwen2_5OmniThinkerCausalLMOutputWithPast,Qwen2_5OmniThinkerTextModel,Qwen2_5OmniPreTrainedModel
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import Qwen2_5OmniThinkerConfig
 class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
     _tied_weights_keys = ["lm_head.weight",""]
     def __init__(self, config: Qwen2_5OmniThinkerConfig):
-        Qwen2_5OmniPreTrainedModel.__init__(self, config)
-        self.vocab_size = config.vocab_size
+        Qwen2_5OmniPreTrainedModelForConditionalGeneration.__init__(self,config)
         self.model = Qwen2_5OmniThinkerTextModel._from_config(
-            config, attn_implementation="flash_attention_2"
+            config.text_config, attn_implementation="flash_attention_2"
         )
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
+        self.spatial_merge_size = config.vision_config.spatial_merge_size
+        self.rope_deltas = None
         self.post_init()
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         image_embed: Optional[torch.FloatTensor] = None,
         video_embed: Optional[torch.FloatTensor] = None,
+        input_features: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -666,7 +670,7 @@ class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
 
         if inputs_embeds is None:
             # 1. Extract the input embeddings
-            inputs_embeds = self.model.embed_tokens()(input_ids)
+            inputs_embeds = self.model.get_input_embeddings()(input_ids)
 
         # 2. Merge text , audios , image and video
         if input_ids is not None and input_ids.shape[1] != 1:  # Prefill stage
@@ -685,7 +689,7 @@ class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
                 audio_features = audio_features_input.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_features)
 
-            if image_embed is not None:
+            if pixel_values is not None:
                 image_embeds = image_embed
                 
                 image_mask = (
@@ -697,7 +701,7 @@ class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
                 image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-            if video_embed is not None:
+            if pixel_values_videos is not None:
                 # video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
                 video_embeds = video_embed
                 video_mask = (
@@ -724,7 +728,7 @@ class CustomQwen2_5_OmniThinkerModel(Qwen2_5OmniThinkerTextModel):
                 or self.rope_deltas is None
             ):
                 delta0 = (1 - attention_mask).sum(dim=-1).unsqueeze(1)
-                position_ids, rope_deltas = self.get_rope_index(
+                position_ids, rope_deltas = Qwen2_5OmniPreTrainedModelForConditionalGeneration.get_rope_index(
                     input_ids,
                     image_grid_thw,
                     video_grid_thw,
@@ -783,7 +787,7 @@ class CustomQwen2_5OmniVisionEncoder(Qwen2_5OmniPreTrainedModel):
 
     def __init__(self, config: Qwen2_5OmniVisionEncoderConfig, *inputs, **kwargs) -> None:
         super().__init__(config, *inputs, **kwargs)
-        self.model = Qwen2_5OmniVisionEncoder._from_config(config)
+        self.model = Qwen2_5OmniVisionEncoder._from_config(config.vision_config)
         self.post_init()
 
     def forward(
@@ -820,7 +824,7 @@ class CustomQwen2_5OmniAudioEncoder(Qwen2_5OmniPreTrainedModel):
 
     def __init__(self, config: Qwen2_5OmniThinkerConfig, *inputs, **kwargs) -> None:
         super().__init__(config, *inputs, **kwargs)
-        self.model = Qwen2_5OmniAudioEncoder._from_config(config)
+        self.model = Qwen2_5OmniAudioEncoder._from_config(config.audio_config)
         self.post_init()
 
     def forward(
@@ -854,3 +858,78 @@ class CustomQwen2_5OmniAudioEncoder(Qwen2_5OmniPreTrainedModel):
             raise ValueError("length of audio_features should match audio_output_lengths")
 
         return audio_features
+
+def replace_multimodal_special_tokens_patch(
+    self,
+    text,
+    audio_lengths,
+    image_grid_thw,
+    video_grid_thw,
+    video_second_per_grid,
+    use_audio_in_video,
+    position_id_per_seconds,
+    seconds_per_chunk,
+):
+    # Extend mm token length
+    merge_length_image = self.image_processor.merge_size**2
+    merge_length_video = self.video_processor.merge_size**2
+
+    processed_text = []
+    for sample in text:
+        positions = []
+        special_tokens = [re.escape(tok) for tok in [self.audio_token, self.image_token, self.video_token]]
+        pattern = "|".join(special_tokens)
+        positions = sorted([(match.start(), match.group()) for match in re.finditer(pattern, sample)])
+        positions.sort(key=lambda x: x[0])
+        ii = 0
+        ij = 0
+        ik = 0
+        for _, special_token in positions:
+            if special_token == self.audio_token:
+                sample = sample.replace(self.audio_token, "<|audio_placeholder|>" * audio_lengths[ii], 1)
+            elif special_token == self.image_token:
+                if image_grid_thw is not None:
+                    image_seq_length = image_grid_thw[ii].prod() // merge_length_image
+                    sample = sample.replace(self.image_token, "<|image_placeholder|>" * image_seq_length, 1)
+                    ii+=1
+            elif special_token == self.video_token:
+                if not use_audio_in_video:
+                    video_seq_length = video_grid_thw[ij].prod() // merge_length_video
+                    sample = sample.replace(self.video_token, "<|video_placeholder|>" * video_seq_length, 1)
+                else:
+                    audio_token_indices = np.arange(audio_lengths[ik])
+                    curr_video_grid_thw = video_grid_thw[ik]
+                    height = curr_video_grid_thw[1] // self.video_processor.merge_size
+                    width = curr_video_grid_thw[2] // self.video_processor.merge_size
+                    video_token_indices = np.arange(curr_video_grid_thw[0]).reshape(-1, 1, 1)
+                    video_token_indices = np.broadcast_to(
+                        video_token_indices, (video_token_indices.shape[0], height, width)
+                    ).reshape(-1)
+                    video_token_indices = (
+                        video_token_indices * video_second_per_grid[ik] * position_id_per_seconds
+                    )
+
+                    tokens_per_chunk = int(position_id_per_seconds * seconds_per_chunk)
+                    video_chunk_indexes = self.get_chunked_index(video_token_indices, tokens_per_chunk)
+                    audio_chunk_indexes = self.get_chunked_index(audio_token_indices, tokens_per_chunk)
+
+                    placeholder_string = self.vision_bos_token + self.audio_bos_token
+                    for j in range(max(len(video_chunk_indexes), len(audio_chunk_indexes))):
+                        if j < len(video_chunk_indexes):
+                            video_seq_length = video_chunk_indexes[j][1] - video_chunk_indexes[j][0]
+                            placeholder_string += "<|video_placeholder|>" * video_seq_length
+                        if j < len(audio_chunk_indexes):
+                            audio_seq_length = audio_chunk_indexes[j][1] - audio_chunk_indexes[j][0]
+                            placeholder_string += "<|audio_placeholder|>" * audio_seq_length
+                    placeholder_string += self.audio_eos_token + self.vision_eos_token
+                    sample = sample.replace(
+                        self.vision_bos_token + self.video_token + self.vision_eos_token,
+                        placeholder_string,
+                        1,
+                    )
+
+        sample = sample.replace("<|audio_placeholder|>", self.audio_token)
+        sample = sample.replace("<|image_placeholder|>", self.image_token)
+        sample = sample.replace("<|video_placeholder|>", self.video_token)
+        processed_text.append(sample)
+    return processed_text
